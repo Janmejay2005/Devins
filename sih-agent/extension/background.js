@@ -158,15 +158,24 @@ chrome.runtime.onMessage.addListener(
 
             sendResponse({
 
-                success: true,
+    success: true,
 
-                detectionCount:
-                    preparation.detections.length,
+    detectionCount:
+        preparation.detections.length,
 
-                sanitizedImage:
-                    sanitized.sanitizedImage
+    sanitizedImage:
+        sanitized.sanitizedImage,
 
-            });
+    detections:
+        preparation.detections,
+
+    pageUrl:
+        tab.url || null,
+
+    domElements:
+        []
+
+});
 
 
         } catch (error) {

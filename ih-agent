@@ -1,0 +1,293 @@
+[1mdiff --git a/sih-agent/extension/background.js b/sih-agent/extension/background.js[m
+[1mindex f006db9..048142e 100644[m
+[1m--- a/sih-agent/extension/background.js[m
+[1m+++ b/sih-agent/extension/background.js[m
+[36m@@ -158,15 +158,24 @@[m [mchrome.runtime.onMessage.addListener([m
+ [m
+             sendResponse({[m
+ [m
+[31m-                success: true,[m
+[32m+[m[32m    success: true,[m
+ [m
+[31m-                detectionCount:[m
+[31m-                    preparation.detections.length,[m
+[32m+[m[32m    detectionCount:[m
+[32m+[m[32m        preparation.detections.length,[m
+ [m
+[31m-                sanitizedImage:[m
+[31m-                    sanitized.sanitizedImage[m
+[32m+[m[32m    sanitizedImage:[m
+[32m+[m[32m        sanitized.sanitizedImage,[m
+ [m
+[31m-            });[m
+[32m+[m[32m    detections:[m
+[32m+[m[32m        preparation.detections,[m
+[32m+[m
+[32m+[m[32m    pageUrl:[m
+[32m+[m[32m        tab.url || null,[m
+[32m+[m
+[32m+[m[32m    domElements:[m
+[32m+[m[32m        [][m
+[32m+[m
+[32m+[m[32m});[m
+ [m
+ [m
+         } catch (error) {[m
+[1mdiff --git a/sih-agent/extension/manifest.json b/sih-agent/extension/manifest.json[m
+[1mindex 17b19fe..d8191d9 100644[m
+[1m--- a/sih-agent/extension/manifest.json[m
+[1m+++ b/sih-agent/extension/manifest.json[m
+[36m@@ -10,8 +10,9 @@[m
+     "storage"[m
+ ],[m
+   "host_permissions": [[m
+[31m-    "<all_urls>"[m
+[31m-  ],[m
+[32m+[m[32m    "<all_urls>",[m
+[32m+[m[32m    "http://127.0.0.1:8000/*"[m
+[32m+[m[32m],[m
+   "background": {[m
+     "service_worker": "background.js"[m
+   },[m
+[1mdiff --git a/sih-agent/extension/popup.js b/sih-agent/extension/popup.js[m
+[1mindex 881159e..f966206 100644[m
+[1m--- a/sih-agent/extension/popup.js[m
+[1m+++ b/sih-agent/extension/popup.js[m
+[36m@@ -24,6 +24,10 @@[m [mbutton.addEventListener("click", async () => {[m
+ [m
+     try {[m
+ [m
+[32m+[m[32m        // =================================================[m
+[32m+[m[32m        // STEP 1 — LOCAL PRIVACY ENGINE[m
+[32m+[m[32m        // =================================================[m
+[32m+[m
+         const response =[m
+             await chrome.runtime.sendMessage({[m
+ [m
+[36m@@ -32,7 +36,28 @@[m [mbutton.addEventListener("click", async () => {[m
+             });[m
+ [m
+ [m
+[31m-        if (!response || !response.success) {[m
+[32m+[m[32m        console.log([m
+[32m+[m[32m            "🛡️ Local sanitization response:",[m
+[32m+[m[32m            response[m
+[32m+[m[32m        );[m
+[32m+[m
+[32m+[m
+[32m+[m[32m        console.log([m
+[32m+[m[32m            "🔢 Detection count:",[m
+[32m+[m[32m            response?.detectionCount[m
+[32m+[m[32m        );[m
+[32m+[m
+[32m+[m
+[32m+[m[32m        console.log([m
+[32m+[m[32m            "📦 Detections:",[m
+[32m+[m[32m            response?.detections[m
+[32m+[m[32m        );[m
+[32m+[m
+[32m+[m
+[32m+[m[32m        if ([m
+[32m+[m[32m            !response ||[m
+[32m+[m[32m            !response.success[m
+[32m+[m[32m        ) {[m
+ [m
+             throw new Error([m
+                 response?.error ||[m
+[36m@@ -42,40 +67,183 @@[m [mbutton.addEventListener("click", async () => {[m
+         }[m
+ [m
+ [m
+[32m+[m[32m        // =================================================[m
+[32m+[m[32m        // STEP 2 — SHOW SANITIZED IMAGE[m
+[32m+[m[32m        // =================================================[m
+[32m+[m
+[32m+[m[32m        preview.src =[m
+[32m+[m[32m            response.sanitizedImage;[m
+[32m+[m
+[32m+[m[32m        preview.style.display =[m
+[32m+[m[32m            "block";[m
+[32m+[m
+[32m+[m
+         result.innerHTML = `[m
+ [m
+[31m-            <strong>✅ Sanitization complete</strong>[m
+[32m+[m[32m            <strong>[m
+[32m+[m[32m                ✅ Local sanitization complete[m
+[32m+[m[32m            </strong>[m
+ [m
+[31m-            <br>[m
+[32m+[m[32m            <br><br>[m
+ [m
+             PII regions redacted:[m
+[31m-            ${response.detectionCount}[m
+[32m+[m[32m            <b>${response.detectionCount}</b>[m
+ [m
+[31m-            <br>[m
+[32m+[m[32m            <br><br>[m
+[32m+[m
+[32m+[m[32m            🔒 Raw screenshot never leaves browser.[m
+[32m+[m
+[32m+[m[32m            <br><br>[m
+ [m
+[31m-            Raw screenshot was processed[m
+[31m-            locally.[m
+[32m+[m[32m            Sending sanitized visual context[m
+[32m+[m[32m            to AI server...[m
+ [m
+         `;[m
+ [m
+ [m
+[31m-        preview.src =[m
+[31m-            response.sanitizedImage;[m
+[32m+[m[32m        // =================================================[m
+[32m+[m[32m        // STEP 3 — SEND SANITIZED CONTEXT[m
+[32m+[m[32m        // =================================================[m
+ [m
+[31m-        preview.style.display =[m
+[31m-            "block";[m
+[32m+[m[32m        const payload = {[m
+ [m
+[32m+[m[32m            screenshot:[m
+[32m+[m[32m                response.sanitizedImage,[m
+[32m+[m
+[32m+[m[32m            detections:[m
+[32m+[m[32m                response.detections || [],[m
+[32m+[m
+[32m+[m[32m            page_url:[m
+[32m+[m[32m                response.pageUrl || null,[m
+[32m+[m
+[32m+[m[32m            dom_elements:[m
+[32m+[m[32m                response.domElements || [][m
+[32m+[m
+[32m+[m[32m        };[m
+[32m+[m
+[32m+[m
+[32m+[m[32m        console.log([m
+[32m+[m[32m            "📤 Sending sanitized payload:",[m
+[32m+[m[32m            {[m
+[32m+[m[32m                detectionCount:[m
+[32m+[m[32m                    payload.detections.length,[m
+[32m+[m
+[32m+[m[32m                pageUrl:[m
+[32m+[m[32m                    payload.page_url,[m
+[32m+[m
+[32m+[m[32m                domElementCount:[m
+[32m+[m[32m                    payload.dom_elements.length[m
+[32m+[m[32m            }[m
+[32m+[m[32m        );[m
+[32m+[m
+[32m+[m
+[32m+[m[32m        const serverResponse =[m
+[32m+[m[32m            await fetch([m
+[32m+[m[32m                "http://127.0.0.1:8000/analyze",[m
+[32m+[m[32m                {[m
+[32m+[m
+[32m+[m[32m                    method: "POST",[m
+[32m+[m
+[32m+[m[32m                    headers: {[m
+[32m+[m
+[32m+[m[32m                        "Content-Type":[m
+[32m+[m[32m                            "application/json"[m
+[32m+[m
+[32m+[m[32m                    },[m
+[32m+[m
+[32m+[m[32m                    body:[m
+[32m+[m[32m                        JSON.stringify(payload)[m
+[32m+[m
+[32m+[m[32m                }[m
+[32m+[m[32m            );[m
+ [m
+[31m-    } catch (error) {[m
+ [m
+[31m-        console.error(error);[m
+[32m+[m[32m        if (!serverResponse.ok) {[m
+[32m+[m
+[32m+[m[32m            throw new Error([m
+[32m+[m[32m                `Server returned HTTP ${serverResponse.status}`[m
+[32m+[m[32m            );[m
+[32m+[m
+[32m+[m[32m        }[m
+[32m+[m
+[32m+[m
+[32m+[m[32m        // =================================================[m
+[32m+[m[32m        // STEP 4 — RECEIVE AI ACTION[m
+[32m+[m[32m        // =================================================[m
+[32m+[m
+[32m+[m[32m        const aiResult =[m
+[32m+[m[32m            await serverResponse.json();[m
+[32m+[m
+[32m+[m
+[32m+[m[32m        console.log([m
+[32m+[m[32m            "🤖 AI server response:",[m
+[32m+[m[32m            aiResult[m
+[32m+[m[32m        );[m
+[32m+[m
+[32m+[m
+[32m+[m[32m        if (!aiResult.success) {[m
+[32m+[m
+[32m+[m[32m            throw new Error([m
+[32m+[m[32m                aiResult.action?.reason ||[m
+[32m+[m[32m                "AI analysis failed"[m
+[32m+[m[32m            );[m
+[32m+[m
+[32m+[m[32m        }[m
+[32m+[m
+[32m+[m
+[32m+[m[32m        const action =[m
+[32m+[m[32m            aiResult.action;[m
+[32m+[m
+[32m+[m
+[32m+[m[32m        // =================================================[m
+[32m+[m[32m        // STEP 5 — DISPLAY ACTION[m
+[32m+[m[32m        // =================================================[m
+ [m
+         result.innerHTML = `[m
+ [m
+[31m-            <strong>❌ Error</strong>[m
+[32m+[m[32m            <strong>[m
+[32m+[m[32m                ✅ AI analysis complete[m
+[32m+[m[32m            </strong>[m
+[32m+[m
+[32m+[m[32m            <br><br>[m
+[32m+[m
+[32m+[m[32m            <b>Action:</b>[m
+[32m+[m[32m            ${action.type}[m
+[32m+[m
+[32m+[m[32m            <br>[m
+[32m+[m
+[32m+[m[32m            <b>Confidence:</b>[m
+[32m+[m[32m            ${action.confidence}[m
+ [m
+             <br>[m
+ [m
+[32m+[m[32m            <b>Reason:</b>[m
+[32m+[m[32m            ${action.reason}[m
+[32m+[m
+[32m+[m[32m            <br><br>[m
+[32m+[m
+[32m+[m[32m            <b>Server latency:</b>[m
+[32m+[m[32m            ${aiResult.processing_time_ms} ms[m
+[32m+[m
+[32m+[m[32m        `;[m
+[32m+[m
+[32m+[m
+[32m+[m[32m    } catch (error) {[m
+[32m+[m
+[32m+[m[32m        console.error([m
+[32m+[m[32m            "❌ Agent pipeline error:",[m
+[32m+[m[32m            error[m
+[32m+[m[32m        );[m
+[32m+[m
+[32m+[m
+[32m+[m[32m        result.innerHTML = `[m
+[32m+[m
+[32m+[m[32m            <strong>[m
+[32m+[m[32m                ❌ Pipeline error[m
+[32m+[m[32m            </strong>[m
+[32m+[m
+[32m+[m[32m            <br><br>[m
+[32m+[m
+             ${error.message}[m
+ [m
+         `;[m
