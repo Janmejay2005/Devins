@@ -5,9 +5,10 @@
   "description": "Privacy-preserving on-device visual perception for browser agents.",
   "permissions": [
     "activeTab",
+    "tabs",
     "scripting",
     "storage"
-  ],
+],
   "host_permissions": [
     "<all_urls>"
   ],

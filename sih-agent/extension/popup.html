@@ -2,41 +2,155 @@
 <html>
 
 <head>
+
     <meta charset="UTF-8">
+
     <title>SIH Privacy Agent</title>
 
     <style>
+
         body {
-            width: 320px;
+            width: 340px;
             padding: 20px;
+            margin: 0;
             font-family: Arial, sans-serif;
+            background: #ffffff;
+            color: #111827;
         }
 
         h2 {
             margin-top: 0;
+            margin-bottom: 8px;
         }
 
         .status {
+
             padding: 12px;
+
             border-radius: 8px;
-            background: #f1f5f9;
-            margin-top: 10px;
+
+            background: #ecfdf5;
+
+            border: 1px solid #10b981;
+
+            color: #065f46;
+
+            margin: 15px 0;
+
         }
+
+        button {
+
+            width: 100%;
+
+            padding: 12px;
+
+            border: none;
+
+            border-radius: 8px;
+
+            background: #1e3a5f;
+
+            color: white;
+
+            font-size: 14px;
+
+            font-weight: bold;
+
+            cursor: pointer;
+
+        }
+
+        button:hover {
+
+            background: #162d49;
+
+        }
+
+        button:disabled {
+
+            background: #9ca3af;
+
+            cursor: not-allowed;
+
+        }
+
+        #result {
+
+            margin-top: 15px;
+
+            font-size: 13px;
+
+            line-height: 1.5;
+
+        }
+
+        #preview {
+
+            width: 100%;
+
+            margin-top: 12px;
+
+            border-radius: 8px;
+
+            border: 1px solid #d1d5db;
+
+            display: none;
+
+        }
+
+        .privacy-note {
+
+            margin-top: 15px;
+
+            font-size: 12px;
+
+            color: #6b7280;
+
+        }
+
     </style>
+
 </head>
+
 
 <body>
 
-    <h2> SIH Privacy Agent</h2>
+    <h2>🔒 SIH Privacy Agent</h2>
 
     <div class="status">
-        <strong>Status:</strong> Local Privacy Engine Active
+
+        <strong>● Local Privacy Engine Active</strong>
+
     </div>
 
-    <p>
-        Sensitive information is detected locally
-        before browser data is sent to the server.
-    </p>
+
+    <button id="sanitizeButton">
+
+        🛡️ Capture & Sanitize Screen
+
+    </button>
+
+
+    <div id="result"></div>
+
+
+    <img
+        id="preview"
+        alt="Sanitized screenshot preview"
+    >
+
+
+    <div class="privacy-note">
+
+        Raw screen pixels are processed locally.
+        Only the sanitized representation is intended
+        for transmission.
+
+    </div>
+
+
+    <script src="popup.js"></script>
 
 </body>
 

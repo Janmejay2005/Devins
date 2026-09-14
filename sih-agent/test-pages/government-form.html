@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>Government Service Portal</title>
+
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            font-family: Arial, sans-serif;
+            background: #eef2f7;
+            color: #1f2937;
+        }
+
+        header {
+            background: #1e3a5f;
+            color: white;
+            padding: 22px 40px;
+        }
+
+        header h1 {
+            margin: 0;
+            font-size: 24px;
+        }
+
+        header p {
+            margin: 6px 0 0;
+            opacity: 0.85;
+        }
+
+        .container {
+            max-width: 850px;
+            margin: 35px auto;
+            background: white;
+            padding: 35px;
+            border-radius: 12px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+        }
+
+        .section {
+            margin-bottom: 28px;
+        }
+
+        .section h2 {
+            font-size: 18px;
+            border-bottom: 1px solid #ddd;
+            padding-bottom: 10px;
+        }
+
+        .field {
+            margin: 18px 0;
+        }
+
+        label {
+            display: block;
+            font-weight: bold;
+            margin-bottom: 7px;
+        }
+
+        input {
+            width: 100%;
+            padding: 12px;
+            border: 1px solid #cbd5e1;
+            border-radius: 7px;
+            font-size: 15px;
+        }
+
+        .row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+
+        .sensitive-text {
+            background: #f8fafc;
+            border: 1px solid #cbd5e1;
+            padding: 15px;
+            border-radius: 7px;
+            font-family: monospace;
+        }
+
+        button {
+            background: #1e3a5f;
+            color: white;
+            border: none;
+            padding: 13px 28px;
+            border-radius: 7px;
+            cursor: pointer;
+            font-size: 15px;
+        }
+
+        button:hover {
+            background: #162d49;
+        }
+
+        .notice {
+            background: #fff7ed;
+            border-left: 4px solid #f97316;
+            padding: 12px 15px;
+            margin-bottom: 25px;
+        }
+    </style>
+</head>
+
+<body>
+
+<header>
+    <h1>Government Citizen Service Portal</h1>
+    <p>Citizen Identity Verification & Registration</p>
+</header>
+
+<div class="container">
+
+    <div class="notice">
+        This is a synthetic test page for the SIH Privacy Browser Agent.
+        All personal information shown below is fake.
+    </div>
+
+    <div class="section">
+        <h2>Personal Information</h2>
+
+        <div class="field">
+            <label>Full Name</label>
+            <input
+                type="text"
+                name="full_name"
+                value="Rahul Sharma"
+            >
+        </div>
+
+        <div class="row">
+
+            <div class="field">
+                <label>Email Address</label>
+                <input
+                    type="email"
+                    name="email"
+                    autocomplete="email"
+                    value="rahul.sharma@example.com"
+                >
+
+            </div>
+
+            <div class="field">
+                <label>Mobile Number</label>
+                <input
+                    type="tel"
+                    name="phone"
+                    autocomplete="tel"
+                    value="+919876543210"
+                >
+            </div>
+
+        </div>
+
+    </div>
+
+
+    <div class="section">
+
+        <h2>Identity Information</h2>
+
+        <div class="field">
+
+            <label>Aadhaar Number</label>
+
+            <div class="sensitive-text">
+                Aadhaar: 2345 6789 0123
+            </div>
+
+        </div>
+
+        <div class="field">
+
+            <label>PAN Number</label>
+
+            <div class="sensitive-text">
+                PAN: ABCDE1234F
+            </div>
+
+        </div>
+
+    </div>
+
+
+    <div class="section">
+
+        <h2>Financial Information</h2>
+
+        <div class="field">
+
+            <label>Credit Card Number</label>
+
+            <input
+                type="text"
+                name="card_number"
+                autocomplete="cc-number"
+                value="4111 1111 1111 1111"
+            >
+
+        </div>
+
+    </div>
+
+
+    <div class="section">
+
+        <h2>Account Security</h2>
+
+        <div class="field">
+
+            <label>Password</label>
+
+            <input
+                type="password"
+                name="password"
+                value="SecretPassword123"
+            >
+
+        </div>
+
+    </div>
+
+
+    <button id="submitBtn">
+        Submit Application
+    </button>
+
+</div>
+
+</body>
+</html>
