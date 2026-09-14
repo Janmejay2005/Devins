@@ -1,96 +1,692 @@
-// =========================================================
+// ============================================================
 // SIH PRIVACY BROWSER AGENT
-// CONTENT SCRIPT
-// Day 2.2
-// =========================================================
+// On-device PII detection + visual redaction + action execution
+// ============================================================
 
-console.log("🔒 SIH Privacy Agent loaded");
+console.log("🔐 SIH Privacy Agent loaded");
 
-
-// =========================================================
+// ============================================================
 // GLOBAL STATE
-// =========================================================
+// ============================================================
 
 let privacyDetections = [];
 let privacyOverlays = [];
 
+let privacyEngineRunning = false;
+let privacyRunTimer = null;
 
-// =========================================================
-// PII REGEX
-// =========================================================
+// ============================================================
+// PII REGEX PATTERNS
+// ============================================================
 
 const PII_PATTERNS = {
 
+    // Email
     EMAIL:
         /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi,
 
+    // Indian mobile numbers
     PHONE:
         /(?:\+91[\s-]?)?[6-9]\d{9}\b/g,
 
+    // Aadhaar:
+    // Exactly 12 digits, optionally separated into groups.
+    //
+    // IMPORTANT:
+    // Negative digit boundaries prevent matching a 12-digit
+    // portion of a longer phone/card number.
     AADHAAR:
-        /\b\d{4}[\s-]?\d{4}[\s-]?\d{4}\b/g,
+        /(?<![+\d])\d{4}[\s-]?\d{4}[\s-]?\d{4}(?!\d)/g,
 
+    // PAN
     PAN:
-        /\b[A-Z]{5}[0-9]{4}[A-Z]\b/gi,
+        /\b[A-Z]{5}\d{4}[A-Z]\b/gi,
 
-    CARD:
-        /\b(?:\d{4}[\s-]?){3}\d{4}\b/g
+    // Credit/debit card candidate
+    CREDIT_CARD:
+        /\b(?:\d[\s-]*?){13,19}\b/g
 };
 
+// ============================================================
+// UTILITY
+// ============================================================
 
-// =========================================================
-// DOM PII DETECTION
-// =========================================================
+function normalizeDigits(value) {
 
-function detectDOMPII() {
-
-    const detections = [];
-
-    const inputs =
-        document.querySelectorAll(
-            "input, textarea"
-        );
-
-
-    inputs.forEach((input) => {
-
-        const type =
-            (input.type || "").toLowerCase();
-
-
-        if (
-            type === "password"
-        ) {
-
-            detections.push({
-
-                type: "PASSWORD",
-
-                source: "DOM",
-
-                confidence: 0.99,
-
-                element: input
-
-            });
-
-        }
-
-    });
-
-
-    return detections;
-
+    return String(value || "")
+        .replace(/\D/g, "");
 }
 
 
-// =========================================================
-// TEXT PII DETECTION
-// =========================================================
+// ============================================================
+// VISIBILITY CHECK
+// ============================================================
 
-function detectTextPII() {
+function isVisibleElement(element) {
 
-    const detections = [];
+    if (!element) {
+        return false;
+    }
+
+    const style =
+        window.getComputedStyle(element);
+
+    if (
+        style.display === "none" ||
+        style.visibility === "hidden" ||
+        style.opacity === "0"
+    ) {
+        return false;
+    }
+
+    const rect =
+        element.getBoundingClientRect();
+
+    return (
+        rect.width > 0 &&
+        rect.height > 0
+    );
+}
+
+
+// ============================================================
+// CREDIT CARD VALIDATION
+// ============================================================
+
+function isValidCreditCard(value) {
+
+    const digits =
+        normalizeDigits(value);
+
+    if (
+        digits.length < 13 ||
+        digits.length > 19
+    ) {
+        return false;
+    }
+
+    // Luhn algorithm
+    let sum = 0;
+    let shouldDouble = false;
+
+    for (
+        let i = digits.length - 1;
+        i >= 0;
+        i--
+    ) {
+
+        let digit =
+            Number(digits[i]);
+
+        if (shouldDouble) {
+
+            digit *= 2;
+
+            if (digit > 9) {
+                digit -= 9;
+            }
+        }
+
+        sum += digit;
+
+        shouldDouble =
+            !shouldDouble;
+    }
+
+    return sum % 10 === 0;
+}
+
+
+// ============================================================
+// AADHAAR VALIDATION
+// ============================================================
+
+function isAadhaarCandidate(
+    text,
+    match
+) {
+
+    const matchStart =
+        match.index;
+
+    const matchEnd =
+        match.index +
+        match[0].length;
+
+    // --------------------------------------------------------
+    // Find the complete numeric token surrounding the match.
+    // This prevents a 12-digit substring inside a longer number
+    // from being treated as Aadhaar.
+    // --------------------------------------------------------
+
+    let start =
+        matchStart;
+
+    let end =
+        matchEnd;
+
+    while (
+        start > 0 &&
+        /[\d\s-]/.test(
+            text[start - 1]
+        )
+    ) {
+        start--;
+    }
+
+    while (
+        end < text.length &&
+        /[\d\s-]/.test(
+            text[end]
+        )
+    ) {
+        end++;
+    }
+
+    const surroundingToken =
+        text.substring(
+            start,
+            end
+        );
+
+    const surroundingDigits =
+        normalizeDigits(
+            surroundingToken
+        );
+
+    // Aadhaar must be exactly 12 digits.
+    if (
+        surroundingDigits.length !== 12
+    ) {
+        return false;
+    }
+
+    // --------------------------------------------------------
+    // Do not allow +91 to become part of Aadhaar.
+    // --------------------------------------------------------
+
+    const before =
+        text.substring(
+            Math.max(
+                0,
+                matchStart - 3
+            ),
+            matchStart
+        );
+
+    if (
+        before.endsWith("+91")
+    ) {
+        return false;
+    }
+
+    return true;
+}
+
+
+// ============================================================
+// DETECTION RECTANGLE FOR ELEMENT
+// ============================================================
+
+function getDetectionRectForElement(
+    element
+) {
+
+    if (!element) {
+        return null;
+    }
+
+    try {
+
+        const rect =
+            element.getBoundingClientRect();
+
+        if (
+            rect.width <= 0 ||
+            rect.height <= 0
+        ) {
+            return null;
+        }
+
+        return {
+
+            left:
+                rect.left,
+
+            top:
+                rect.top,
+
+            right:
+                rect.right,
+
+            bottom:
+                rect.bottom,
+
+            width:
+                rect.width,
+
+            height:
+                rect.height
+        };
+
+    } catch {
+
+        return null;
+    }
+}
+
+
+// ============================================================
+// RECTANGLE OVERLAP
+// ============================================================
+
+function rectanglesOverlap(
+    a,
+    b
+) {
+
+    if (!a || !b) {
+        return false;
+    }
+
+    const horizontal =
+        a.left < b.right &&
+        a.right > b.left;
+
+    const vertical =
+        a.top < b.bottom &&
+        a.bottom > b.top;
+
+    return (
+        horizontal &&
+        vertical
+    );
+}
+
+
+// ============================================================
+// ADD DETECTION
+// ============================================================
+
+function addDetection({
+
+    type,
+    confidence,
+    source,
+    element,
+    value,
+    node = null
+
+}) {
+
+    if (!element) {
+        return;
+    }
+
+    const normalizedValue =
+
+        type === "PASSWORD"
+
+            ? "[REDACTED]"
+
+            : String(value || "")
+                .trim()
+                .replace(/\s+/g, " ");
+
+    const rect =
+        getDetectionRectForElement(
+            element
+        );
+
+    // --------------------------------------------------------
+    // Prevent duplicate detections.
+    //
+    // Same type + same value + same/overlapping region
+    // means it is the same PII entity.
+    // --------------------------------------------------------
+
+    const duplicate =
+        privacyDetections.some(
+            (existing) => {
+
+                if (
+                    existing.type !==
+                    type
+                ) {
+                    return false;
+                }
+
+                const existingValue =
+
+                    existing.type ===
+                    "PASSWORD"
+
+                        ? "[REDACTED]"
+
+                        : String(
+                            existing.value ||
+                            ""
+                        )
+                            .trim()
+                            .replace(
+                                /\s+/g,
+                                " "
+                            );
+
+                if (
+                    existingValue !==
+                    normalizedValue
+                ) {
+                    return false;
+                }
+
+                // Same element
+                if (
+                    existing.element ===
+                    element
+                ) {
+                    return true;
+                }
+
+                // Same visual region
+                const existingRect =
+                    getDetectionRectForElement(
+                        existing.element
+                    );
+
+                if (
+                    !rect ||
+                    !existingRect
+                ) {
+                    return false;
+                }
+
+                return rectanglesOverlap(
+                    rect,
+                    existingRect
+                );
+            }
+        );
+
+    if (duplicate) {
+        return;
+    }
+
+    privacyDetections.push({
+
+        type,
+
+        confidence,
+
+        source,
+
+        element,
+
+        value:
+            normalizedValue,
+
+        node
+    });
+}
+
+
+// ============================================================
+// DETECT PII INSIDE TEXT
+// ============================================================
+
+function detectPIIPatterns(
+
+    text,
+
+    element,
+
+    source = "dom",
+
+    node = null
+
+) {
+
+    if (
+        !text ||
+        !element
+    ) {
+        return;
+    }
+
+    const cleanText =
+        String(text);
+
+    let match;
+
+
+    // ========================================================
+    // EMAIL
+    // ========================================================
+
+    const emailRegex =
+        new RegExp(
+            PII_PATTERNS.EMAIL.source,
+            "gi"
+        );
+
+    while (
+        (
+            match =
+                emailRegex.exec(
+                    cleanText
+                )
+        ) !== null
+    ) {
+
+        addDetection({
+
+            type:
+                "EMAIL",
+
+            confidence:
+                0.99,
+
+            source,
+
+            element,
+
+            value:
+                match[0],
+
+            node
+        });
+    }
+
+
+    // ========================================================
+    // PHONE
+    // ========================================================
+
+    const phoneRegex =
+        new RegExp(
+            PII_PATTERNS.PHONE.source,
+            "g"
+        );
+
+    while (
+        (
+            match =
+                phoneRegex.exec(
+                    cleanText
+                )
+        ) !== null
+    ) {
+
+        addDetection({
+
+            type:
+                "PHONE",
+
+            confidence:
+                0.99,
+
+            source,
+
+            element,
+
+            value:
+                match[0],
+
+            node
+        });
+    }
+
+
+    // ========================================================
+    // AADHAAR
+    // ========================================================
+
+    const aadhaarRegex =
+        new RegExp(
+            PII_PATTERNS.AADHAAR.source,
+            "g"
+        );
+
+    while (
+        (
+            match =
+                aadhaarRegex.exec(
+                    cleanText
+                )
+        ) !== null
+    ) {
+
+        if (
+            isAadhaarCandidate(
+                cleanText,
+                match
+            )
+        ) {
+
+            addDetection({
+
+                type:
+                    "AADHAAR",
+
+                confidence:
+                    0.99,
+
+                source,
+
+                element,
+
+                value:
+                    match[0],
+
+                node
+            });
+        }
+    }
+
+
+    // ========================================================
+    // PAN
+    // ========================================================
+
+    const panRegex =
+        new RegExp(
+            PII_PATTERNS.PAN.source,
+            "gi"
+        );
+
+    while (
+        (
+            match =
+                panRegex.exec(
+                    cleanText
+                )
+        ) !== null
+    ) {
+
+        addDetection({
+
+            type:
+                "PAN",
+
+            confidence:
+                0.99,
+
+            source,
+
+            element,
+
+            value:
+                match[0],
+
+            node
+        });
+    }
+
+
+    // ========================================================
+    // CREDIT CARD
+    // ========================================================
+
+    const cardRegex =
+        new RegExp(
+            PII_PATTERNS.CREDIT_CARD.source,
+            "g"
+        );
+
+    while (
+        (
+            match =
+                cardRegex.exec(
+                    cleanText
+                )
+        ) !== null
+    ) {
+
+        if (
+            isValidCreditCard(
+                match[0]
+            )
+        ) {
+
+            addDetection({
+
+                type:
+                    "CREDIT_CARD",
+
+                confidence:
+                    0.99,
+
+                source,
+
+                element,
+
+                value:
+                    match[0],
+
+                node
+            });
+        }
+    }
+}
+
+
+// ============================================================
+// DOM PII DETECTION
+// ============================================================
+
+function detectDOMPII() {
+
+    // Start completely fresh
+    privacyDetections = [];
+
+    if (!document.body) {
+        return [];
+    }
+
+
+    // ========================================================
+    // 1. NORMAL PAGE TEXT
+    // ========================================================
 
     const walker =
         document.createTreeWalker(
@@ -98,138 +694,289 @@ function detectTextPII() {
             document.body,
 
             NodeFilter.SHOW_TEXT
-
         );
 
+    let node;
 
-    const textNodes = [];
+    while (
+        (
+            node =
+                walker.nextNode()
+        )
+    ) {
 
+        const text =
+            node.textContent?.trim();
 
-    while (walker.nextNode()) {
+        if (!text) {
+            continue;
+        }
 
-        textNodes.push(
-            walker.currentNode
+        const parent =
+            node.parentElement;
+
+        if (!parent) {
+            continue;
+        }
+
+        const tag =
+            parent.tagName?.toUpperCase();
+
+        // Ignore implementation elements
+        if (
+            tag === "SCRIPT" ||
+            tag === "STYLE" ||
+            tag === "NOSCRIPT"
+        ) {
+            continue;
+        }
+
+        if (
+            !isVisibleElement(
+                parent
+            )
+        ) {
+            continue;
+        }
+
+        detectPIIPatterns(
+
+            text,
+
+            parent,
+
+            "dom",
+
+            node
         );
-
     }
 
 
-    textNodes.forEach((node) => {
+    // ========================================================
+    // 2. INPUT + TEXTAREA VALUES
+    //
+    // input.value is NOT included in textContent.
+    // This is why form PII needs a separate scan.
+    // ========================================================
 
-        const text =
-            node.textContent || "";
-
-
-        Object.entries(
-            PII_PATTERNS
-        ).forEach(
-            ([type, pattern]) => {
-
-                pattern.lastIndex = 0;
-
-
-                let match;
-
-
-                while (
-                    (match =
-                        pattern.exec(text))
-                ) {
-
-                    detections.push({
-
-                        type,
-
-                        source: "TEXT",
-
-                        confidence: 0.97,
-
-                        node,
-
-                        index:
-                            match.index,
-
-                        length:
-                            match[0].length
-
-                    });
-
-                }
-
-            }
+    const fields =
+        document.querySelectorAll(
+            "input, textarea"
         );
 
-    });
+    fields.forEach(
+        (field) => {
+
+            if (
+                !isVisibleElement(
+                    field
+                )
+            ) {
+                return;
+            }
 
 
-    return detections;
+            // ------------------------------------------------
+            // PASSWORD
+            // ------------------------------------------------
 
+            if (
+
+                field.tagName ===
+                    "INPUT" &&
+
+                field.type
+                    ?.toLowerCase() ===
+                    "password"
+
+            ) {
+
+                addDetection({
+
+                    type:
+                        "PASSWORD",
+
+                    confidence:
+                        1.0,
+
+                    source:
+                        "input",
+
+                    element:
+                        field,
+
+                    value:
+                        "[REDACTED]"
+                });
+
+                return;
+            }
+
+
+            // ------------------------------------------------
+            // INPUT/TEXTAREA VALUE
+            // ------------------------------------------------
+
+            const value =
+                field.value?.trim();
+
+            if (!value) {
+                return;
+            }
+
+            detectPIIPatterns(
+
+                value,
+
+                field,
+
+                "input"
+            );
+        }
+    );
+
+
+    // ========================================================
+    // LOG
+    // ========================================================
+
+    console.log(
+
+        "🔍 Local PII detections:",
+
+        privacyDetections.length,
+
+        privacyDetections.map(
+            (detection) => ({
+
+                type:
+                    detection.type,
+
+                source:
+                    detection.source,
+
+                confidence:
+                    detection.confidence
+            })
+        )
+    );
+
+    return privacyDetections;
 }
 
 
-// =========================================================
-// GET ELEMENT RECT
-// =========================================================
+// ============================================================
+// GET DETECTION RECTANGLE
+// ============================================================
 
 function getDetectionRect(
     detection
 ) {
 
-    if (
-        detection.element
-    ) {
+    if (!detection) {
+        return null;
+    }
 
-        return detection.element
-            .getBoundingClientRect();
+    const element =
+        detection.element;
 
+    if (!element) {
+        return null;
     }
 
 
+    // --------------------------------------------------------
+    // HTMLElement
+    // --------------------------------------------------------
+
     if (
-        detection.node
+        element instanceof
+        HTMLElement
     ) {
 
-        const range =
-            document.createRange();
+        const rect =
+            element.getBoundingClientRect();
 
+        if (
+            rect.width > 0 &&
+            rect.height > 0
+        ) {
+
+            return {
+
+                left:
+                    rect.left,
+
+                top:
+                    rect.top,
+
+                width:
+                    rect.width,
+
+                height:
+                    rect.height
+            };
+        }
+    }
+
+
+    // --------------------------------------------------------
+    // Text node
+    // --------------------------------------------------------
+
+    if (detection.node) {
 
         try {
 
-            range.setStart(
-                detection.node,
-                detection.index
+            const range =
+                document.createRange();
+
+            range.selectNodeContents(
+                detection.node
             );
 
+            const rect =
+                range.getBoundingClientRect();
 
-            range.setEnd(
-                detection.node,
-                detection.index +
-                detection.length
-            );
+            if (
+                rect.width > 0 &&
+                rect.height > 0
+            ) {
 
+                return {
 
-            return range.getBoundingClientRect();
+                    left:
+                        rect.left,
+
+                    top:
+                        rect.top,
+
+                    width:
+                        rect.width,
+
+                    height:
+                        rect.height
+                };
+            }
 
         } catch (error) {
 
             console.warn(
-                "Could not calculate text rect",
+
+                "⚠️ Could not calculate text rect:",
+
                 error
             );
-
         }
-
     }
 
-
     return null;
-
 }
 
 
-// =========================================================
+// ============================================================
 // CREATE PRIVACY OVERLAY
-// =========================================================
+// ============================================================
 
 function createPrivacyOverlay(
     detection
@@ -240,27 +987,21 @@ function createPrivacyOverlay(
             detection
         );
 
-
-    if (
-        !rect ||
-        rect.width <= 0 ||
-        rect.height <= 0
-    ) {
-
+    if (!rect) {
         return null;
-
     }
-
 
     const overlay =
         document.createElement(
             "div"
         );
 
-
-    overlay.dataset.sihPrivacyOverlay =
+    overlay.dataset
+        .sihPrivacyOverlay =
         "true";
 
+    overlay.dataset.piiType =
+        detection.type;
 
     overlay.style.position =
         "fixed";
@@ -286,53 +1027,68 @@ function createPrivacyOverlay(
     overlay.style.pointerEvents =
         "none";
 
+    overlay.style.boxSizing =
+        "border-box";
+
+    overlay.style.border =
+        "2px solid #000000";
+
     overlay.style.borderRadius =
-        "2px";
+        "3px";
 
+    overlay.title =
+        `Protected ${detection.type}`;
 
-    document.body.appendChild(
+    document.documentElement.appendChild(
         overlay
     );
 
+    privacyOverlays.push({
+
+        overlay,
+
+        detection
+    });
 
     return overlay;
-
 }
 
 
-// =========================================================
+// ============================================================
 // UPDATE OVERLAY POSITION
-// =========================================================
+// ============================================================
 
 function updateOverlayPosition(
-    overlay,
-    detection
+    item
 ) {
+
+    const {
+        overlay,
+        detection
+    } = item;
 
     if (
         !overlay ||
         !detection
     ) {
-
         return;
-
     }
-
 
     const rect =
         getDetectionRect(
             detection
         );
 
+    if (!rect) {
 
-    if (
-        !rect
-    ) {
+        overlay.style.display =
+            "none";
 
         return;
-
     }
 
+    overlay.style.display =
+        "block";
 
     overlay.style.left =
         `${rect.left}px`;
@@ -345,513 +1101,426 @@ function updateOverlayPosition(
 
     overlay.style.height =
         `${rect.height}px`;
-
 }
 
 
-// =========================================================
+// ============================================================
 // UPDATE ALL OVERLAYS
-// =========================================================
+// ============================================================
 
 function updateAllOverlayPositions() {
 
     privacyOverlays.forEach(
-        (overlay, index) => {
-
-            const detection =
-                privacyDetections[index];
-
-
-            updateOverlayPosition(
-                overlay,
-                detection
-            );
-
-        }
+        updateOverlayPosition
     );
-
 }
 
 
-// =========================================================
-// REMOVE PRIVACY OVERLAYS
-// =========================================================
+// ============================================================
+// REMOVE OVERLAYS
+// ============================================================
 
 function removePrivacyOverlays() {
 
     privacyOverlays.forEach(
-        (overlay) => {
+        ({ overlay }) => {
 
-            overlay.remove();
-
+            try {
+                overlay.remove();
+            } catch {
+                // Ignore
+            }
         }
     );
 
-
     privacyOverlays = [];
-
 }
 
 
-// =========================================================
-// RUN PRIVACY ENGINE
-// =========================================================
+// ============================================================
+// CREATE ALL OVERLAYS
+// ============================================================
 
-function runPrivacyEngine() {
+function createAllPrivacyOverlays() {
 
     removePrivacyOverlays();
 
+    privacyDetections.forEach(
+        (detection) => {
 
-    const domDetections =
-        detectDOMPII();
-
-
-    const textDetections =
-        detectTextPII();
-
-
-    privacyDetections = [
-
-        ...domDetections,
-
-        ...textDetections
-
-    ];
-
-
-    console.log(
-        "🔍 Local PII detections:",
-        privacyDetections
+            createPrivacyOverlay(
+                detection
+            );
+        }
     );
 
-
-    privacyOverlays =
-        privacyDetections
-            .map(
-                createPrivacyOverlay
-            )
-            .filter(Boolean);
-
-
     console.log(
+
         "🛡️ Privacy overlays created:",
+
         privacyOverlays.length
     );
-
 }
 
 
-// =========================================================
-// SCROLL / RESIZE
-// =========================================================
+// ============================================================
+// MAIN PRIVACY ENGINE
+// ============================================================
 
-window.addEventListener(
-    "scroll",
-    updateAllOverlayPositions,
-    {
-        passive: true
+function runPrivacyEngine() {
+
+    if (
+        privacyEngineRunning
+    ) {
+        return;
     }
-);
+
+    privacyEngineRunning =
+        true;
+
+    try {
+
+        detectDOMPII();
+
+        createAllPrivacyOverlays();
+
+    } catch (error) {
+
+        console.error(
+
+            "❌ Privacy engine error:",
+
+            error
+        );
+
+    } finally {
+
+        privacyEngineRunning =
+            false;
+    }
+}
 
 
-window.addEventListener(
-    "resize",
-    updateAllOverlayPositions
-);
+// ============================================================
+// SCHEDULE PRIVACY ENGINE
+// ============================================================
+
+function schedulePrivacyEngine(
+    delay = 200
+) {
+
+    clearTimeout(
+        privacyRunTimer
+    );
+
+    privacyRunTimer =
+        setTimeout(
+            () => {
+
+                runPrivacyEngine();
+
+            },
+            delay
+        );
+}
 
 
-// =========================================================
+// ============================================================
 // SERIALIZABLE DETECTIONS
-// =========================================================
+// ============================================================
 
 function getSerializableDetections() {
 
     return privacyDetections
-        .map((detection) => {
 
-            const rect =
-                getDetectionRect(
-                    detection
-                );
+        .map(
+            (detection) => {
 
+                const rect =
+                    getDetectionRect(
+                        detection
+                    );
 
-            if (!rect) {
+                if (!rect) {
+                    return null;
+                }
 
-                return null;
+                return {
 
+                    type:
+                        detection.type,
+
+                    confidence:
+                        detection.confidence,
+
+                    source:
+                        detection.source,
+
+                    x:
+                        rect.left,
+
+                    y:
+                        rect.top,
+
+                    width:
+                        rect.width,
+
+                    height:
+                        rect.height
+                };
             }
+        )
 
-
-            return {
-
-                type:
-                    detection.type,
-
-                confidence:
-                    detection.confidence,
-
-                source:
-                    detection.source,
-
-                x:
-                    rect.left,
-
-                y:
-                    rect.top,
-
-                width:
-                    rect.width,
-
-                height:
-                    rect.height
-
-            };
-
-        })
         .filter(Boolean);
-
 }
 
 
-// =========================================================
-// SANITIZE SCREENSHOT
-// =========================================================
+// ============================================================
+// SCREENSHOT SANITIZATION
+// ============================================================
 
 async function sanitizeScreenshot(
+
     screenshot,
+
     detections
+
 ) {
 
-    const image =
-        new Image();
-
-
-    image.src =
-        screenshot;
-
-
-    await new Promise(
+    return new Promise(
         (resolve, reject) => {
 
-            image.onload =
-                resolve;
+            try {
 
-            image.onerror =
-                reject;
+                if (!screenshot) {
 
-        }
-    );
+                    reject(
+                        new Error(
+                            "No screenshot received"
+                        )
+                    );
 
+                    return;
+                }
 
-    const canvas =
-        document.createElement(
-            "canvas"
-        );
+                const image =
+                    new Image();
 
+                image.onload =
+                    () => {
 
-    canvas.width =
-        image.naturalWidth;
+                        try {
 
-    canvas.height =
-        image.naturalHeight;
+                            const canvas =
+                                document.createElement(
+                                    "canvas"
+                                );
 
+                            canvas.width =
+                                image.naturalWidth;
 
-    const ctx =
-        canvas.getContext(
-            "2d"
-        );
+                            canvas.height =
+                                image.naturalHeight;
 
+                            const ctx =
+                                canvas.getContext(
+                                    "2d"
+                                );
 
-    ctx.drawImage(
-        image,
-        0,
-        0
-    );
+                            if (!ctx) {
 
+                                reject(
+                                    new Error(
+                                        "Could not create canvas context"
+                                    )
+                                );
 
-    const scaleX =
-        canvas.width /
-        window.innerWidth;
+                                return;
+                            }
 
+                            ctx.drawImage(
 
-    const scaleY =
-        canvas.height /
-        window.innerHeight;
+                                image,
 
+                                0,
 
-    detections.forEach(
-        (detection) => {
-
-            const x =
-                Math.max(
-                    0,
-                    detection.x *
-                    scaleX
-                );
-
-
-            const y =
-                Math.max(
-                    0,
-                    detection.y *
-                    scaleY
-                );
+                                0
+                            );
 
 
-            const width =
-                Math.min(
-                    canvas.width - x,
-                    detection.width *
-                    scaleX
-                );
+                            // ------------------------------------------------
+                            // Calculate screenshot scaling.
+                            // ------------------------------------------------
+
+                            const scaleX =
+
+                                canvas.width /
+                                window.innerWidth;
+
+                            const scaleY =
+
+                                canvas.height /
+                                window.innerHeight;
 
 
-            const height =
-                Math.min(
-                    canvas.height - y,
-                    detection.height *
-                    scaleY
-                );
+                            // ------------------------------------------------
+                            // Redact every detected region.
+                            // ------------------------------------------------
+
+                            detections.forEach(
+                                (detection) => {
+
+                                    const x =
+                                        detection.x *
+                                        scaleX;
+
+                                    const y =
+                                        detection.y *
+                                        scaleY;
+
+                                    const width =
+                                        detection.width *
+                                        scaleX;
+
+                                    const height =
+                                        detection.height *
+                                        scaleY;
+
+                                    ctx.fillStyle =
+                                        "#000000";
+
+                                    ctx.fillRect(
+
+                                        x,
+
+                                        y,
+
+                                        width,
+
+                                        height
+                                    );
+                                }
+                            );
 
 
-            if (
-                width <= 0 ||
-                height <= 0
-            ) {
+                            // ------------------------------------------------
+                            // Convert to sanitized PNG.
+                            // ------------------------------------------------
 
-                return;
+                            const sanitizedImage =
+                                canvas.toDataURL(
+                                    "image/png"
+                                );
 
+                            resolve(
+                                sanitizedImage
+                            );
+
+                        } catch (error) {
+
+                            reject(error);
+                        }
+                    };
+
+
+                image.onerror =
+                    () => {
+
+                        reject(
+                            new Error(
+                                "Failed to load screenshot"
+                            )
+                        );
+                    };
+
+
+                image.src =
+                    screenshot;
+
+            } catch (error) {
+
+                reject(error);
             }
-
-
-            ctx.fillStyle =
-                "#000000";
-
-
-            ctx.fillRect(
-                x,
-                y,
-                width,
-                height
-            );
-
         }
     );
-
-
-    return canvas.toDataURL(
-        "image/png"
-    );
-
 }
 
 
-// =========================================================
-// MESSAGE HANDLER
-// =========================================================
-
-chrome.runtime.onMessage.addListener(
-    (
-        message,
-        sender,
-        sendResponse
-    ) => {
-
-        // =================================================
-        // PREPARE CAPTURE
-        // =================================================
-
-        if (
-            message.type ===
-            "PREPARE_CAPTURE"
-        ) {
-
-            const detections =
-                getSerializableDetections();
-
-
-            removePrivacyOverlays();
-
-
-            console.log(
-                "📐 Capture prepared with",
-                detections.length,
-                "PII regions"
-            );
-
-
-            sendResponse({
-
-                success: true,
-
-                detections
-
-            });
-
-
-            return;
-
-        }
-
-
-        // =================================================
-        // SANITIZE SCREENSHOT
-        // =================================================
-
-        if (
-            message.type ===
-            "SANITIZE_SCREENSHOT"
-        ) {
-
-            sanitizeScreenshot(
-                message.screenshot,
-                message.detections
-            )
-                .then(
-                    (sanitizedImage) => {
-
-                        runPrivacyEngine();
-
-
-                        sendResponse({
-
-                            success: true,
-
-                            sanitizedImage
-
-                        });
-
-                    }
-                )
-                .catch(
-                    (error) => {
-
-                        runPrivacyEngine();
-
-
-                        sendResponse({
-
-                            success: false,
-
-                            error:
-                                error.message
-
-                        });
-
-                    }
-                );
-
-
-            return true;
-
-        }
-
-
-        // =================================================
-        // DAY 2.2 — EXECUTE ACTION
-        // =================================================
-
-        if (
-            message.type ===
-            "EXECUTE_ACTION"
-        ) {
-
-            console.log(
-                "🤖 Action received:",
-                message.action
-            );
-
-
-            const result =
-                executeBrowserAction(
-                    message.action
-                );
-
-
-            console.log(
-                "✅ Action execution result:",
-                result
-            );
-
-
-            sendResponse(
-                result
-            );
-
-
-            return;
-
-        }
-
-    }
-);
-
-
-// =========================================================
-// ACTION EXECUTOR
-// =========================================================
+// ============================================================
+// BROWSER ACTION EXECUTION
+// ============================================================
 
 function executeBrowserAction(
     action
 ) {
 
-    if (
-        !action ||
-        !action.type
-    ) {
+    if (!action) {
 
         return {
 
-            success: false,
+            success:
+                false,
 
             error:
-                "Invalid action"
-
+                "No action received"
         };
-
     }
 
+    console.log(
 
-    // =====================================================
+        "🤖 Action received:",
+
+        action
+    );
+
+    const actionType =
+        action.type;
+
+
+    // ========================================================
     // CLICK
-    // =====================================================
+    // ========================================================
 
     if (
-        action.type ===
+        actionType ===
         "click"
     ) {
 
         const target =
-            action.target;
+            action.target || {};
 
+        const x =
+            Number(target.x);
+
+        const y =
+            Number(target.y);
 
         if (
-            !target ||
-            typeof target.x !==
-                "number" ||
-            typeof target.y !==
-                "number"
+
+            !Number.isFinite(x) ||
+
+            !Number.isFinite(y)
+
         ) {
 
             return {
 
-                success: false,
+                success:
+                    false,
 
                 error:
-                    "Click action requires x and y"
-
+                    "Invalid click coordinates"
             };
-
         }
 
+        console.log(
 
-        const x =
-            target.x;
+            "🎯 Click target:",
 
+            x,
 
-        const y =
-            target.y;
-
+            y
+        );
 
         const element =
             document.elementFromPoint(
@@ -859,337 +1528,735 @@ function executeBrowserAction(
                 y
             );
 
-
         if (!element) {
 
             return {
 
-                success: false,
+                success:
+                    false,
 
                 error:
                     `No element found at (${x}, ${y})`
-
             };
-
         }
 
 
-        console.log(
-            "🎯 Click target:",
-            element
-        );
-
-
-        // -------------------------------------------------
-        // Prevent clicking our own privacy overlays
-        // -------------------------------------------------
+        // ----------------------------------------------------
+        // NEVER CLICK PRIVACY OVERLAY
+        // ----------------------------------------------------
 
         if (
+
             element.dataset &&
-            element.dataset.sihPrivacyOverlay ===
+
+            element.dataset
+                .sihPrivacyOverlay ===
                 "true"
+
         ) {
 
             return {
 
-                success: false,
+                success:
+                    false,
 
                 error:
                     "Click blocked by privacy overlay"
-
             };
-
         }
 
 
-        element.click();
+        // ----------------------------------------------------
+        // NEVER AUTOMATE PASSWORD FIELD
+        // ----------------------------------------------------
+
+        if (
+
+            element.tagName ===
+                "INPUT" &&
+
+            element.type
+                ?.toLowerCase() ===
+                "password"
+
+        ) {
+
+            return {
+
+                success:
+                    false,
+
+                error:
+                    "Password-field automation blocked"
+            };
+        }
 
 
-        console.log(
-            "🖱️ Click executed"
-        );
+        // ----------------------------------------------------
+        // EXECUTE CLICK
+        // ----------------------------------------------------
 
+        try {
 
-        return {
+            element.click();
 
-            success: true,
+            console.log(
+                "🖱️ Click executed"
+            );
 
-            action: "click",
+            return {
 
-            element:
-                element.tagName,
+                success:
+                    true,
 
-            text:
-                (
-                    element.innerText ||
-                    element.value ||
-                    ""
-                )
-                    .trim()
-                    .substring(0, 100)
+                action:
+                    "click",
 
-        };
+                element:
+                    element.tagName,
 
+                text:
+                    (
+                        element.innerText ||
+
+                        element.value ||
+
+                        element.getAttribute(
+                            "aria-label"
+                        ) ||
+
+                        ""
+                    )
+                        .trim()
+                        .substring(
+                            0,
+                            100
+                        )
+            };
+
+        } catch (error) {
+
+            return {
+
+                success:
+                    false,
+
+                error:
+                    error.message
+            };
+        }
     }
 
 
-    // =====================================================
+    // ========================================================
     // TYPE
-    // =====================================================
+    // ========================================================
 
     if (
-        action.type ===
+        actionType ===
         "type"
     ) {
 
         const target =
-            action.target;
+            action.target || {};
 
+        const x =
+            Number(target.x);
+
+        const y =
+            Number(target.y);
 
         const value =
             action.value;
 
-
         if (
-            !target ||
-            typeof target.x !==
-                "number" ||
-            typeof target.y !==
-                "number"
+
+            !Number.isFinite(x) ||
+
+            !Number.isFinite(y)
+
         ) {
 
             return {
 
-                success: false,
+                success:
+                    false,
 
                 error:
-                    "Type action requires x and y"
-
+                    "Invalid typing coordinates"
             };
-
         }
-
-
-        if (
-            typeof value !==
-            "string"
-        ) {
-
-            return {
-
-                success: false,
-
-                error:
-                    "Type action requires value"
-
-            };
-
-        }
-
 
         const element =
             document.elementFromPoint(
-                target.x,
-                target.y
+                x,
+                y
             );
-
 
         if (!element) {
 
             return {
 
-                success: false,
+                success:
+                    false,
 
                 error:
-                    "No element found"
-
+                    "No typing target found"
             };
-
         }
 
-
-        const tag =
-            element.tagName
-                .toLowerCase();
-
-
         if (
-            tag !== "input" &&
-            tag !== "textarea"
+
+            element.tagName !==
+                "INPUT" &&
+
+            element.tagName !==
+                "TEXTAREA"
+
         ) {
 
             return {
 
-                success: false,
+                success:
+                    false,
 
                 error:
-                    "Target is not an input"
-
+                    "Target is not an input field"
             };
-
         }
 
 
+        // ----------------------------------------------------
+        // NEVER TYPE INTO PASSWORD
+        // ----------------------------------------------------
+
         if (
-            element.type ===
-            "password"
+
+            element.type
+                ?.toLowerCase() ===
+                "password"
+
         ) {
 
             return {
 
-                success: false,
+                success:
+                    false,
 
                 error:
                     "Password-field automation blocked"
-
             };
-
         }
 
 
-        element.focus();
+        // ----------------------------------------------------
+        // TYPE VALUE
+        // ----------------------------------------------------
 
+        try {
 
-        element.value =
-            value;
+            element.focus();
 
+            element.value =
+                String(
+                    value ?? ""
+                );
 
-        element.dispatchEvent(
-            new Event(
-                "input",
-                {
-                    bubbles: true
-                }
-            )
-        );
+            element.dispatchEvent(
 
+                new Event(
+                    "input",
+                    {
+                        bubbles:
+                            true
+                    }
+                )
+            );
 
-        element.dispatchEvent(
-            new Event(
-                "change",
-                {
-                    bubbles: true
-                }
-            )
-        );
+            element.dispatchEvent(
 
+                new Event(
+                    "change",
+                    {
+                        bubbles:
+                            true
+                    }
+                )
+            );
 
-        console.log(
-            "⌨️ Text entered"
-        );
+            console.log(
 
+                "⌨️ Text entered successfully"
+            );
 
-        return {
+            return {
 
-            success: true,
+                success:
+                    true,
 
-            action: "type",
+                action:
+                    "type",
 
-            element:
-                element.tagName,
+                element:
+                    element.tagName
+            };
 
-            valueLength:
-                value.length
+        } catch (error) {
 
-        };
+            return {
 
+                success:
+                    false,
+
+                error:
+                    error.message
+            };
+        }
     }
 
 
-    // =====================================================
+    // ========================================================
     // SCROLL
-    // =====================================================
+    // ========================================================
 
     if (
-        action.type ===
+        actionType ===
         "scroll"
     ) {
 
-        const amount =
-            typeof action.value ===
-                "number"
-                ? action.value
-                : 500;
+        const target =
+            action.target || {};
 
+        const amount =
+            Number(
+
+                target.y ??
+
+                action.value ??
+
+                500
+            );
 
         window.scrollBy({
 
             top:
-                amount,
+
+                Number.isFinite(
+                    amount
+                )
+
+                    ? amount
+
+                    : 500,
+
+            left:
+                0,
 
             behavior:
                 "smooth"
-
         });
-
 
         return {
 
-            success: true,
+            success:
+                true,
 
-            action: "scroll",
+            action:
+                "scroll",
 
             amount
-
         };
-
     }
 
 
-    // =====================================================
+    // ========================================================
     // WAIT
-    // =====================================================
+    // ========================================================
 
     if (
-        action.type ===
+        actionType ===
         "wait"
     ) {
 
+        const delay =
+            Number(
+                action.value ||
+                1000
+            );
+
         return {
 
-            success: true,
+            success:
+                true,
 
-            action: "wait"
+            action:
+                "wait",
 
+            delay
         };
-
     }
 
 
-    // =====================================================
+    // ========================================================
     // NONE
-    // =====================================================
+    // ========================================================
 
     if (
-        action.type ===
+        actionType ===
         "none"
     ) {
 
         return {
 
-            success: true,
+            success:
+                true,
 
-            action: "none"
-
+            action:
+                "none"
         };
-
     }
 
 
+    // ========================================================
+    // UNKNOWN ACTION
+    // ========================================================
+
     return {
 
-        success: false,
+        success:
+            false,
 
         error:
-            `Unsupported action type: ${action.type}`
-
+            `Unsupported action type: ${actionType}`
     };
-
 }
 
 
-// =========================================================
-// INITIAL RUN
-// =========================================================
+// ============================================================
+// MESSAGE HANDLER
+// ============================================================
 
-runPrivacyEngine();
+chrome.runtime.onMessage.addListener(
+
+    (
+        message,
+        sender,
+        sendResponse
+    ) => {
+
+
+        // ====================================================
+        // PREPARE CAPTURE
+        // ====================================================
+
+        if (
+            message.type ===
+            "PREPARE_CAPTURE"
+        ) {
+
+            // Refresh detections immediately
+            runPrivacyEngine();
+
+            const detections =
+                getSerializableDetections();
+
+            // Remove overlays before screenshot
+            removePrivacyOverlays();
+
+            console.log(
+
+                "📐 Capture prepared with",
+
+                detections.length,
+
+                "PII regions"
+            );
+
+            sendResponse({
+
+                success:
+                    true,
+
+                detections
+            });
+
+            return;
+        }
+
+
+        // ====================================================
+        // SANITIZE SCREENSHOT
+        // ====================================================
+
+        if (
+            message.type ===
+            "SANITIZE_SCREENSHOT"
+        ) {
+
+            sanitizeScreenshot(
+
+                message.screenshot,
+
+                message.detections ||
+                    []
+            )
+
+                .then(
+
+                    (sanitizedImage) => {
+
+                        // Restore privacy overlays
+                        runPrivacyEngine();
+
+                        sendResponse({
+
+                            success:
+                                true,
+
+                            sanitizedImage
+                        });
+                    }
+                )
+
+                .catch(
+
+                    (error) => {
+
+                        runPrivacyEngine();
+
+                        sendResponse({
+
+                            success:
+                                false,
+
+                            error:
+                                error.message
+                        });
+                    }
+                );
+
+            // Async response
+            return true;
+        }
+
+
+        // ====================================================
+        // EXECUTE ACTION
+        // ====================================================
+
+        if (
+            message.type ===
+            "EXECUTE_ACTION"
+        ) {
+
+            const result =
+                executeBrowserAction(
+                    message.action
+                );
+
+            console.log(
+
+                "✅ Action execution result:",
+
+                result
+            );
+
+            sendResponse(
+                result
+            );
+
+            return;
+        }
+    }
+);
+
+
+// ============================================================
+// SCROLL EVENT
+// ============================================================
+
+window.addEventListener(
+
+    "scroll",
+
+    () => {
+
+        updateAllOverlayPositions();
+
+    },
+
+    {
+        passive:
+            true
+    }
+);
+
+
+// ============================================================
+// RESIZE EVENT
+// ============================================================
+
+window.addEventListener(
+
+    "resize",
+
+    () => {
+
+        updateAllOverlayPositions();
+
+    }
+);
+
+
+// ============================================================
+// INPUT EVENT
+// ============================================================
+
+document.addEventListener(
+
+    "input",
+
+    () => {
+
+        schedulePrivacyEngine(
+            150
+        );
+
+    },
+
+    true
+);
+
+
+// ============================================================
+// MUTATION OBSERVER
+// ============================================================
+//
+// Important:
+// Our own privacy overlays modify the DOM.
+// We must NOT continuously rerun the privacy engine
+// because of our own overlay creation/removal.
+// ============================================================
+
+function mutationContainsOnlyPrivacyOverlays(
+    mutation
+) {
+
+    const nodes = [
+
+        ...Array.from(
+            mutation.addedNodes || []
+        ),
+
+        ...Array.from(
+            mutation.removedNodes || []
+        )
+    ];
+
+    if (
+        nodes.length === 0
+    ) {
+
+        return false;
+    }
+
+    return nodes.every(
+        (node) => {
+
+            // Text nodes are not privacy overlays.
+            if (
+                node.nodeType !==
+                Node.ELEMENT_NODE
+            ) {
+
+                return true;
+            }
+
+            return (
+
+                node.dataset &&
+
+                node.dataset
+                    .sihPrivacyOverlay ===
+                    "true"
+            );
+        }
+    );
+}
+
+
+const privacyObserver =
+    new MutationObserver(
+
+        (mutations) => {
+
+            const relevantMutation =
+                mutations.some(
+                    (mutation) => {
+
+                        return (
+
+                            !mutationContainsOnlyPrivacyOverlays(
+                                mutation
+                            )
+                        );
+                    }
+                );
+
+            if (!relevantMutation) {
+                return;
+            }
+
+            schedulePrivacyEngine(
+                250
+            );
+        }
+    );
+
+
+privacyObserver.observe(
+
+    document.documentElement,
+
+    {
+
+        childList:
+            true,
+
+        subtree:
+            true
+    }
+);
+
+
+// ============================================================
+// INITIAL RUN
+// ============================================================
+
+if (
+
+    document.readyState ===
+    "loading"
+
+) {
+
+    document.addEventListener(
+
+        "DOMContentLoaded",
+
+        () => {
+
+            runPrivacyEngine();
+
+        },
+
+        {
+            once:
+                true
+        }
+    );
+
+} else {
+
+    runPrivacyEngine();
+}
