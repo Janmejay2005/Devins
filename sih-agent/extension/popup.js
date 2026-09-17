@@ -1,465 +1,669 @@
-// =========================================================
+// ============================================================
 // SIH PRIVACY BROWSER AGENT
-// POPUP
-// Day 2.2
-// =========================================================
+// popup.js
+// ============================================================
+
+console.log(
+    "🟢 SIH Privacy Agent popup loaded"
+);
 
 
-const button =
+// ============================================================
+// DOM ELEMENTS
+// ============================================================
+
+const captureButton =
     document.getElementById(
-        "sanitizeButton"
+        "captureButton"
     );
-
 
 const result =
     document.getElementById(
         "result"
     );
 
-
-const preview =
+const resultTitle =
     document.getElementById(
-        "preview"
+        "resultTitle"
+    );
+
+const resultContent =
+    document.getElementById(
+        "resultContent"
     );
 
 
-// =========================================================
-// MAIN BUTTON
-// =========================================================
+// ============================================================
+// SAFETY CHECK
+// ============================================================
 
-button.addEventListener(
-    "click",
-    async () => {
+if (!captureButton) {
+
+    console.error(
+        "❌ Capture button not found."
+    );
+}
 
 
-        button.disabled =
+// ============================================================
+// SHOW RESULT
+// ============================================================
+
+function showResult(
+    title,
+    content,
+    success = true
+) {
+
+    result.classList.remove(
+        "hidden"
+    );
+
+
+    resultTitle.textContent =
+        title;
+
+
+    resultContent.innerHTML =
+        content;
+
+
+    resultTitle.className =
+        success
+            ? "result-title success"
+            : "result-title error";
+}
+
+
+// ============================================================
+// SET BUTTON LOADING
+// ============================================================
+
+function setLoading(
+    loading
+) {
+
+    if (loading) {
+
+        captureButton.disabled =
             true;
 
+        captureButton.innerHTML =
+            `<span class="loading"></span>
+             Capturing & Sanitizing...`;
 
-        button.textContent =
-            "⏳ Processing locally...";
+    } else {
 
+        captureButton.disabled =
+            false;
 
-        result.textContent =
-            "Capturing and sanitizing screen...";
-
-
-        preview.style.display =
-            "none";
-
-
-        try {
-
-
-            // =================================================
-            // STEP 1 — LOCAL PRIVACY PIPELINE
-            // =================================================
-
-            const response =
-                await chrome.runtime.sendMessage({
-
-                    type:
-                        "CAPTURE_AND_SANITIZE"
-
-                });
+        captureButton.innerHTML =
+            `🛡️ Capture &amp; Sanitize Screen`;
+    }
+}
 
 
-            console.log(
-                "🛡️ Local sanitization response:",
-                response
+// ============================================================
+// CAPTURE PIPELINE
+// ============================================================
+
+async function captureAndAnalyze() {
+
+    console.log(
+        "🚀 Capture button clicked"
+    );
+
+
+    setLoading(true);
+
+
+    result.classList.add(
+        "hidden"
+    );
+
+
+    try {
+
+        // ====================================================
+        // STEP 1 — CAPTURE + LOCAL SANITIZATION
+        // ====================================================
+
+        console.log(
+            "📸 Requesting capture from background..."
+        );
+
+
+        const captureResponse =
+            await chrome.runtime.sendMessage({
+
+                type:
+                    "CAPTURE_AND_SANITIZE"
+            });
+
+
+        console.log(
+            "📨 Capture response:",
+            captureResponse
+        );
+
+
+        if (
+            !captureResponse
+        ) {
+
+            throw new Error(
+                "No response received from background service."
             );
+        }
 
 
-            if (
-                !response ||
-                !response.success
-            ) {
+        if (
+            !captureResponse.success
+        ) {
 
-                throw new Error(
-
-                    response?.error ||
-                    "Local sanitization failed"
-
-                );
-
-            }
-
-
-            console.log(
-                "🔢 Detection count:",
-                response.detectionCount
+            throw new Error(
+                captureResponse.error ||
+                "Capture and sanitization failed."
             );
+        }
 
 
-            console.log(
-                "📦 Detections:",
-                response.detections
+        const sanitizedImage =
+            captureResponse.sanitizedImage;
+
+
+        if (!sanitizedImage) {
+
+            throw new Error(
+                "Sanitized screenshot was not returned."
             );
+        }
 
 
-            // =================================================
-            // STEP 2 — SHOW SANITIZED IMAGE
-            // =================================================
-
-            preview.src =
-                response.sanitizedImage;
+        const detections =
+            captureResponse.detections ||
+            [];
 
 
-            preview.style.display =
-                "block";
+        const domElements =
+            captureResponse.dom_elements ||
+            [];
 
 
-            result.innerHTML = `
-
-                <strong>
-                    ✅ Local sanitization complete
-                </strong>
-
-                <br><br>
-
-                PII regions redacted:
-                <b>
-                    ${response.detectionCount}
-                </b>
-
-                <br><br>
-
-                🔒 Raw screenshot never leaves browser.
-
-                <br><br>
-
-                Sending sanitized visual context...
-
-            `;
+        const pageUrl =
+            captureResponse.page_url ||
+            "";
 
 
-            // =================================================
-            // STEP 3 — SEND TO FASTAPI
-            // =================================================
-
-            const payload = {
-
-                screenshot:
-                    response.sanitizedImage,
-
-                detections:
-                    response.detections || [],
-
-                page_url:
-                    response.pageUrl || null,
-
-                dom_elements:
-                    response.domElements || []
-
-            };
+        const viewport =
+            captureResponse.viewport ||
+            null;
 
 
-            console.log(
-                "📤 Sending sanitized payload:",
+        console.log(
+            "🛡️ Local PII detections:",
+            detections.length
+        );
+
+
+        console.log(
+            "🧩 Safe DOM elements:",
+            domElements.length
+        );
+
+
+        console.log(
+            "🌐 Page:",
+            pageUrl
+        );
+
+
+        // ====================================================
+        // SHOW SANITIZED IMAGE
+        // ====================================================
+
+        showResult(
+
+            "🛡️ Screen sanitized locally",
+
+            `
+                <div class="row">
+                    <span class="label">
+                        Privacy detections:
+                    </span>
+                    ${detections.length}
+                </div>
+
+                <div class="row">
+                    <span class="label">
+                        Safe DOM elements:
+                    </span>
+                    ${domElements.length}
+                </div>
+
+                <div class="row">
+                    <span class="label">
+                        Network payload:
+                    </span>
+                    Sanitized screenshot only
+                </div>
+
+                <img
+                    class="preview"
+                    src="${sanitizedImage}"
+                    alt="Sanitized screenshot"
+                />
+
+                <div class="small">
+                    Raw sensitive pixels were redacted locally
+                    before server processing.
+                </div>
+            `,
+
+            true
+        );
+
+
+        // ====================================================
+        // STEP 2 — SEND SANITIZED DATA TO FASTAPI
+        // ====================================================
+
+        console.log(
+            "🌐 Sending sanitized data to FastAPI..."
+        );
+
+
+        const startTime =
+            performance.now();
+
+
+        const response =
+            await fetch(
+                "http://127.0.0.1:8000/analyze",
                 {
-                    detections:
-                        payload.detections.length,
 
-                    pageUrl:
-                        payload.page_url
+                    method: "POST",
+
+                    headers: {
+
+                        "Content-Type":
+                            "application/json"
+                    },
+
+                    body:
+                        JSON.stringify({
+
+                            screenshot:
+                                sanitizedImage,
+
+                            detections:
+                                detections,
+
+                            page_url:
+                                pageUrl,
+
+                            dom_elements:
+                                domElements,
+
+                            viewport:
+                                viewport
+                        })
                 }
             );
 
 
-            const serverResponse =
-                await fetch(
-
-                    "http://127.0.0.1:8000/analyze",
-
-                    {
-
-                        method:
-                            "POST",
-
-                        headers: {
-
-                            "Content-Type":
-                                "application/json"
-
-                        },
-
-                        body:
-                            JSON.stringify(
-                                payload
-                            )
-
-                    }
-
-                );
+        const serverLatency =
+            performance.now() -
+            startTime;
 
 
-            if (
-                !serverResponse.ok
-            ) {
+        if (!response.ok) {
 
-                throw new Error(
-
-                    `FastAPI returned HTTP ${serverResponse.status}`
-
-                );
-
-            }
+            throw new Error(
+                `FastAPI returned HTTP ${response.status}`
+            );
+        }
 
 
-            // =================================================
-            // STEP 4 — RECEIVE AI ACTION
-            // =================================================
-
-            const aiResult =
-                await serverResponse.json();
+        const data =
+            await response.json();
 
 
-            console.log(
-                "🤖 AI server response:",
-                aiResult
+        console.log(
+            "🤖 AI response:",
+            data
+        );
+
+
+        if (
+            !data.success
+        ) {
+
+            throw new Error(
+                data.error ||
+                "AI analysis failed."
+            );
+        }
+
+
+        // ====================================================
+        // STEP 3 — DISPLAY ACTION
+        // ====================================================
+
+        const action =
+            data.action ||
+            {
+                type: "none"
+            };
+
+
+        const actionType =
+            action.type ||
+            "none";
+
+
+        const confidence =
+            action.confidence ??
+            0;
+
+
+        const reason =
+            action.reason ||
+            "No reason provided";
+
+
+        // ====================================================
+        // NONE
+        // ====================================================
+
+        if (
+            actionType ===
+            "none"
+        ) {
+
+            showResult(
+
+                "✅ AI analysis completed",
+
+                `
+                    <div class="row">
+                        <span class="label">
+                            Action:
+                        </span>
+                        none
+                    </div>
+
+                    <div class="row">
+                        <span class="label">
+                            Confidence:
+                        </span>
+                        ${confidence}
+                    </div>
+
+                    <div class="row">
+                        <span class="label">
+                            Reason:
+                        </span>
+                        ${escapeHTML(reason)}
+                    </div>
+
+                    <div class="row">
+                        <span class="label">
+                            Server latency:
+                        </span>
+                        ${Number(
+                            data.processing_time_ms || 0
+                        ).toFixed(2)} ms
+                    </div>
+
+                    <img
+                        class="preview"
+                        src="${sanitizedImage}"
+                        alt="Sanitized screenshot"
+                    />
+                `,
+
+                true
             );
 
 
-            if (
-                !aiResult.success
-            ) {
-
-                throw new Error(
-
-                    aiResult.action?.reason ||
-                    "AI analysis failed"
-
-                );
-
-            }
+            return;
+        }
 
 
-            const action =
-                aiResult.action;
+        // ====================================================
+        // EXECUTE ACTION
+        // ====================================================
+
+        console.log(
+            "🎯 Action received:",
+            action
+        );
 
 
-            console.log(
-                "🎯 Action received:",
+        const executionResponse =
+            await chrome.runtime.sendMessage({
+
+                type:
+                    "EXECUTE_BROWSER_ACTION",
+
                 action
-            );
+            });
 
 
-            // =================================================
-            // STEP 5 — EXECUTE ACTION
-            // =================================================
-
-            result.innerHTML = `
-
-                <strong>
-                    🤖 AI action generated
-                </strong>
-
-                <br><br>
-
-                <b>Action:</b>
-                ${action.type}
-
-                <br>
-
-                <b>Confidence:</b>
-                ${action.confidence}
-
-                <br>
-
-                <b>Reason:</b>
-                ${action.reason}
-
-                <br><br>
-
-                Executing browser action...
-
-            `;
+        console.log(
+            "🖱️ Execution response:",
+            executionResponse
+        );
 
 
-            let executionResult =
-                null;
+        const executionSuccess =
+            executionResponse &&
+            executionResponse.success;
 
 
-            if (
-                action.type !==
-                "none"
-            ) {
+        let executionHTML;
 
 
-                console.log(
-                    "🚀 Sending action to extension:",
-                    action
-                );
+        if (
+            executionSuccess
+        ) {
 
+            executionHTML = `
 
-                executionResult =
-                    await chrome.runtime.sendMessage({
+                <div class="row success">
 
-                        type:
-                            "EXECUTE_BROWSER_ACTION",
-
-                        action:
-                            action
-
-                    });
-
-
-                console.log(
-                    "🖱️ Execution response:",
-                    executionResult
-                );
-
-            }
-
-
-            // =================================================
-            // STEP 6 — SHOW FINAL RESULT
-            // =================================================
-
-            if (
-                action.type ===
-                "none"
-            ) {
-
-                result.innerHTML = `
-
-                    <strong>
-                        ℹ️ No action required
-                    </strong>
-
-                    <br><br>
-
-                    <b>Reason:</b>
-                    ${action.reason}
-
-                    <br><br>
-
-                    <b>Server latency:</b>
-                    ${aiResult.processing_time_ms} ms
-
-                `;
-
-            }
-
-
-            else if (
-                executionResult &&
-                executionResult.success
-            ) {
-
-                result.innerHTML = `
-
-                    <strong>
-                        ✅ AI action executed
-                    </strong>
-
-                    <br><br>
-
-                    <b>Action:</b>
-                    ${action.type}
-
-                    <br>
-
-                    <b>Confidence:</b>
-                    ${action.confidence}
-
-                    <br>
-
-                    <b>Reason:</b>
-                    ${action.reason}
-
-                    <br><br>
-
-                    <b>Execution:</b>
+                    Execution:
                     ✅ Successful
 
-                    <br>
-
-                    <b>Server latency:</b>
-                    ${aiResult.processing_time_ms} ms
-
-                `;
-
-            }
-
-
-            else {
-
-                const error =
-                    executionResult?.error ||
-                    "Unknown execution error";
-
-
-                result.innerHTML = `
-
-                    <strong>
-                        ⚠️ AI action generated
-                    </strong>
-
-                    <br><br>
-
-                    <b>Action:</b>
-                    ${action.type}
-
-                    <br>
-
-                    <b>Confidence:</b>
-                    ${action.confidence}
-
-                    <br>
-
-                    <b>Reason:</b>
-                    ${action.reason}
-
-                    <br><br>
-
-                    <b>Execution:</b>
-                    ❌ Failed
-
-                    <br>
-
-                    <b>Error:</b>
-                    ${error}
-
-                `;
-
-            }
-
-
-        }
-
-
-        catch (error) {
-
-
-            console.error(
-                "❌ Pipeline error:",
-                error
-            );
-
-
-            result.innerHTML = `
-
-                <strong>
-                    ❌ Pipeline error
-                </strong>
-
-                <br><br>
-
-                <b>Error:</b>
-                ${error.message}
+                </div>
 
             `;
 
+        } else {
+
+            executionHTML = `
+
+                <div class="row error">
+
+                    Execution:
+                    ❌ Failed
+
+                </div>
+
+                <div class="row error">
+
+                    ${
+                        escapeHTML(
+                            executionResponse?.error ||
+                            executionResponse?.result?.error ||
+                            "Unknown execution error"
+                        )
+                    }
+
+                </div>
+
+            `;
         }
 
 
-        button.disabled =
-            false;
+        // ====================================================
+        // FINAL UI
+        // ====================================================
+
+        showResult(
+
+            "✅ AI action executed",
+
+            `
+
+                <div class="row">
+
+                    <span class="label">
+                        Action:
+                    </span>
+
+                    ${escapeHTML(
+                        actionType
+                    )}
+
+                </div>
 
 
-        button.textContent =
-            "🛡️ Capture & Sanitize Screen";
+                <div class="row">
 
+                    <span class="label">
+                        Confidence:
+                    </span>
+
+                    ${confidence}
+
+                </div>
+
+
+                <div class="row">
+
+                    <span class="label">
+                        Reason:
+                    </span>
+
+                    ${escapeHTML(
+                        reason
+                    )}
+
+                </div>
+
+
+                ${executionHTML}
+
+
+                <div class="row">
+
+                    <span class="label">
+                        Server latency:
+                    </span>
+
+                    ${Number(
+                        data.processing_time_ms || 0
+                    ).toFixed(2)} ms
+
+                </div>
+
+
+                <img
+                    class="preview"
+                    src="${sanitizedImage}"
+                    alt="Sanitized screenshot"
+                />
+
+            `,
+
+            executionSuccess
+        );
+
+
+    } catch (error) {
+
+        console.error(
+            "❌ Pipeline error:",
+            error
+        );
+
+
+        showResult(
+
+            "❌ Pipeline error",
+
+            `
+                <div class="error">
+
+                    ${escapeHTML(
+                        error.message ||
+                        String(error)
+                    )}
+
+                </div>
+
+                <div class="small">
+
+                    Open the extension's service worker
+                    console for detailed logs.
+
+                </div>
+            `,
+
+            false
+        );
+
+    } finally {
+
+        setLoading(false);
     }
+}
+
+
+// ============================================================
+// HTML ESCAPE
+// ============================================================
+
+function escapeHTML(
+    value
+) {
+
+    return String(value ?? "")
+        .replace(
+            /&/g,
+            "&amp;"
+        )
+        .replace(
+            /</g,
+            "&lt;"
+        )
+        .replace(
+            />/g,
+            "&gt;"
+        )
+        .replace(
+            /"/g,
+            "&quot;"
+        )
+        .replace(
+            /'/g,
+            "&#039;"
+        );
+}
+
+
+// ============================================================
+// BUTTON EVENT
+// ============================================================
+
+captureButton.addEventListener(
+    "click",
+    captureAndAnalyze
+);
+
+
+console.log(
+    "✅ Capture button listener attached"
 );

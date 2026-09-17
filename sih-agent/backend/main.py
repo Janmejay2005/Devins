@@ -1,7 +1,8 @@
-from typing import Any, Optional, Literal
+from typing import Any, Dict, List, Optional
 import time
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from vlm import analyze_screenshot
@@ -9,389 +10,281 @@ from vlm import analyze_screenshot
 
 app = FastAPI(
     title="SIH Privacy Browser Agent",
-    version="0.5.0"
+    version="0.1.0"
 )
 
 
-# ============================================================
-# REQUEST
-# ============================================================
+# =========================================================
+# CORS
+# =========================================================
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# =========================================================
+# REQUEST MODEL
+# =========================================================
 
 class AnalyzeRequest(BaseModel):
+
+    screenshot_data_url: Optional[str] = None
+
+    detections: List[Dict[str, Any]] = Field(
+        default_factory=list
+    )
+
+    page_url: str = ""
+
+    dom_elements: List[Dict[str, Any]] = Field(
+        default_factory=list
+    )
+
+    viewport: Dict[str, Any] = Field(
+        default_factory=dict
+    )
 
     task: str = (
         "Analyze the page and choose the safest useful action."
     )
 
-    screenshot: str
 
-    detections: list[
-        dict[str, Any]
-    ] = Field(
-        default_factory=list
-    )
-
-    page_url: Optional[str] = None
-
-    dom_elements: list[
-        dict[str, Any]
-    ] = Field(
-        default_factory=list
-    )
-
-    viewport: Optional[
-        dict[str, Any]
-    ] = None
-
-
-# ============================================================
-# ACTION
-# ============================================================
-
-class Target(BaseModel):
-
-    x: Optional[float] = None
-
-    y: Optional[float] = None
-
-    text: Optional[str] = None
-
-
-class Action(BaseModel):
-
-    type: Literal[
-        "click",
-        "scroll",
-        "wait",
-        "none"
-    ]
-
-    target: Optional[Target] = None
-
-    value: Optional[str] = None
-
-    confidence: float = 0.0
-
-    reason: str = ""
-
-
-# ============================================================
-# RESPONSE
-# ============================================================
+# =========================================================
+# RESPONSE MODEL
+# =========================================================
 
 class AnalyzeResponse(BaseModel):
 
     success: bool
 
-    action: Action
+    action: Optional[Dict[str, Any]] = None
 
-    processing_time_ms: float
+    processing_time_ms: Optional[float] = None
 
-    vlm_latency_ms: float
+    vlm_latency_ms: Optional[float] = None
 
     error: Optional[str] = None
 
 
-# ============================================================
-# ROOT
-# ============================================================
-
-@app.get("/")
-def root():
-
-    return {
-
-        "status": "ok",
-
-        "service":
-            "SIH Privacy Browser Agent",
-
-        "version":
-            "0.5.0",
-
-        "privacy":
-            "sanitized-input-only",
-
-        "vlm":
-            "qwen2.5vl:3b",
-
-        "ollama":
-            "local"
-    }
-
-
-# ============================================================
+# =========================================================
 # HEALTH
-# ============================================================
+# =========================================================
 
 @app.get("/health")
 def health():
 
     return {
-
-        "status":
-            "healthy",
-
-        "vlm":
-            "qwen2.5vl:3b",
-
-        "ollama":
-            "local"
+        "status": "healthy",
+        "vlm": "qwen2.5vl:3b",
+        "ollama": "local"
     }
 
 
-# ============================================================
+# =========================================================
 # ANALYZE
-# ============================================================
+# =========================================================
 
 @app.post(
     "/analyze",
     response_model=AnalyzeResponse
 )
-def analyze(
-    request: AnalyzeRequest
+async def analyze(
+    request: Request
 ):
 
-    start_time =time.perf_counter()
+    start_time = time.perf_counter()
+
+    # -----------------------------------------------------
+    # Read raw JSON
+    # -----------------------------------------------------
+
+    try:
+
+        body = await request.json()
+
+    except Exception as exc:
+
+        return AnalyzeResponse(
+            success=False,
+            error=f"Invalid JSON request: {exc}"
+        )
 
     print()
+    print("==========================================")
+    print("[ANALYZE REQUEST]")
+    print("==========================================")
+
+    print(
+        f"Received fields: {list(body.keys())}"
+    )
+
+    # -----------------------------------------------------
+    # Accept both possible screenshot names
+    # -----------------------------------------------------
+
+    screenshot_data_url = (
+        body.get("screenshot_data_url")
+        or body.get("screenshot")
+        or body.get("sanitizedImage")
+        or body.get("sanitized_image")
+    )
+
+    detections = (
+        body.get("detections")
+        or []
+    )
+
+    page_url = (
+        body.get("page_url")
+        or body.get("url")
+        or ""
+    )
+
+    dom_elements = (
+        body.get("dom_elements")
+        or body.get("domElements")
+        or []
+    )
+
+    viewport = (
+        body.get("viewport")
+        or {}
+    )
+
+    task = (
+        body.get("task")
+        or "Analyze the page and choose the safest useful action."
+    )
+
+    print(
+        f"sanitized screenshot : "
+        f"{'YES' if screenshot_data_url else 'NO'}"
+    )
+
+    print(
+        f"detections           : "
+        f"{len(detections)}"
+    )
+
+    print(
+        f"safe DOM elements    : "
+        f"{len(dom_elements)}"
+    )
+
+    print(
+        f"task                 : "
+        f"{task}"
+    )
+
+    print(
+        f"page                 : "
+        f"{page_url}"
+    )
+
     print(
         "=========================================="
     )
-    print(
-        "[ANALYZE REQUEST]"
-    )
-    print(
-        "=========================================="
-    )
 
-    print(
-        "sanitized screenshot : YES"
-    )
+    # -----------------------------------------------------
+    # Validate screenshot manually
+    # -----------------------------------------------------
 
-    print(
-        "detections           :",
-        len(request.detections)
-    )
+    if not screenshot_data_url:
 
-    print(
-        "safe DOM elements    :",
-        len(request.dom_elements)
-    )
-
-    print(
-        "task                 :",
-        request.task
-    )
-
-    print(
-        "page                 :",
-        request.page_url
-    )
-
-    print(
-        "=========================================="
-    )
-
-    # ========================================================
-    # VALIDATE SCREENSHOT
-    # ========================================================
-
-    if not request.screenshot:
+        total_time = (
+            time.perf_counter()
+            - start_time
+        ) * 1000
 
         return AnalyzeResponse(
 
             success=False,
 
-            action=Action(
-
-                type="none",
-
-                confidence=0.0,
-
-                reason=
-                    "No sanitized screenshot received."
+            processing_time_ms=round(
+                total_time,
+                2
             ),
 
-            processing_time_ms=0.0,
-
-            vlm_latency_ms=0.0,
-
-            error=
-                "No sanitized screenshot received."
+            error=(
+                "No sanitized screenshot was "
+                "received from the extension."
+            )
         )
 
-    # ========================================================
-    # REAL VLM
-    # ========================================================
+    # -----------------------------------------------------
+    # Call VLM
+    # -----------------------------------------------------
 
     try:
 
-        action_data, vlm_latency = (
-            analyze_screenshot(
+        result = analyze_screenshot(
 
-                screenshot_data_url=
-                    request.screenshot,
+            screenshot_data_url=screenshot_data_url,
 
-                dom_elements=
-                    request.dom_elements,
+            detections=detections,
 
-                page_url=
-                    request.page_url,
+            page_url=page_url,
 
-                task=
-                    request.task
-            )
+            dom_elements=dom_elements,
+
+            task=task
         )
 
-        # ====================================================
-        # TARGET
-        # ====================================================
-
-        target_data =action_data.get(
-                "target",
-                {}
-            )
-
-        action =Action(
-
-                type=
-                    action_data[
-                        "type"
-                    ],
-
-                target=
-                    Target(
-
-                        x=
-                            target_data.get(
-                                "x"
-                            ),
-
-                        y=
-                            target_data.get(
-                                "y"
-                            ),
-
-                        text=
-                            target_data.get(
-                                "text"
-                            )
-                    ),
-
-                value=
-                    action_data.get(
-                        "value"
-                    ),
-
-                confidence=
-                    action_data.get(
-                        "confidence",
-                        0.0
-                    ),
-
-                reason=
-                    action_data.get(
-                        "reason",
-                        ""
-                    )
-            )
-
-        # ====================================================
-        # LATENCY
-        # ====================================================
-
-        total_latency = (
+        total_time = (
             time.perf_counter()
             - start_time
         ) * 1000
 
-        # ====================================================
-        # LOG
-        # ====================================================
-
-        print()
         print(
-            "=========================================="
+            f"[ANALYZE] action="
+            f"{result.get('action')}"
         )
 
         print(
-            "[VLM SUCCESS]"
+            f"[ANALYZE] VLM latency="
+            f"{result.get('vlm_latency_ms', 0):.2f} ms"
         )
 
         print(
-            f"action       : {action.type}"
-        )
-
-        print(
-            f"confidence   : "
-            f"{action.confidence:.2f}"
-        )
-
-        print(
-            f"VLM latency  : "
-            f"{vlm_latency:.2f} ms"
-        )
-
-        print(
-            f"total latency: "
-            f"{total_latency:.2f} ms"
-        )
-
-        print(
-            f"reason       : "
-            f"{action.reason}"
-        )
-
-        print(
-            "=========================================="
+            f"[ANALYZE] Total latency="
+            f"{total_time:.2f} ms"
         )
 
         return AnalyzeResponse(
 
             success=True,
 
-            action=action,
+            action=result,
 
-            processing_time_ms=
-                round(
-                    total_latency,
-                    2
-                ),
+            processing_time_ms=round(
+                total_time,
+                2
+            ),
 
-            vlm_latency_ms=
-                round(
-                    vlm_latency,
-                    2
-                ),
-
-            error=None
+            vlm_latency_ms=result.get(
+                "vlm_latency_ms"
+            )
         )
-
-    # ========================================================
-    # VLM ERROR
-    # ========================================================
 
     except Exception as exc:
 
-        total_latency = (
+        total_time = (
             time.perf_counter()
             - start_time
         ) * 1000
 
-        error_message = str(exc)
-
         print()
-        print(
-            "=========================================="
-        )
+        print("==========================================")
+        print("[ANALYZE ERROR]")
+        print("==========================================")
 
         print(
-            "[VLM ERROR]"
-        )
-
-        print(
-            error_message
+            f"{type(exc).__name__}: {exc}"
         )
 
         print(
@@ -402,29 +295,10 @@ def analyze(
 
             success=False,
 
-            action=Action(
-
-                type="none",
-
-                confidence=0.0,
-
-                reason=
-                    f"VLM error: "
-                    f"{error_message}"
+            processing_time_ms=round(
+                total_time,
+                2
             ),
 
-            processing_time_ms=
-                round(
-                    total_latency,
-                    2
-                ),
-
-            vlm_latency_ms=
-                round(
-                    total_latency,
-                    2
-                ),
-
-            error=
-                error_message
+            error=str(exc)
         )
