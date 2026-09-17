@@ -1229,7 +1229,9 @@ function runPrivacyEngine() {
 
         detectDOMPII();
 
-        createPrivacyOverlays();
+        // Keep the webpage completely normal.
+        // PII masking is applied ONLY to captured screenshots.
+        removePrivacyOverlays();
 
     } catch (error) {
 
