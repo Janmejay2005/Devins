@@ -2,6 +2,25 @@
 // SIH PRIVACY BROWSER AGENT
 // content.js
 // ============================================================
+//
+// Privacy-first browser agent content script.
+//
+// IMPORTANT PRIVACY RULE
+// ----------------------
+// The webpage itself is NEVER visually masked by this script.
+//
+// PII masking is applied ONLY to screenshots captured by the
+// extension, immediately before those screenshots are allowed
+// to leave the browser.
+//
+// The content script:
+//   1. Detects PII locally.
+//   2. Provides safe DOM metadata.
+//   3. Sanitizes screenshots locally.
+//   4. Executes approved browser actions.
+//   5. Supports scrolling + re-perception.
+//
+// ============================================================
 
 console.log("🔒 SIH Privacy Agent loaded");
 
@@ -20,7 +39,11 @@ const SIH_CONFIG = {
 
     mutationDelay: 250,
 
-    inputDelay: 150
+    inputDelay: 150,
+
+    scrollAmount: 600,
+
+    scrollDuration: 400
 };
 
 
@@ -37,8 +60,6 @@ const PII_PATTERNS = {
         /(?<![\d])(?:\+91[\s-]?)?[6-9]\d{9}(?!\d)/g,
 
     /*
-     * IMPORTANT:
-     *
      * Aadhaar must NOT be part of a larger number.
      *
      * This prevents:
@@ -86,6 +107,10 @@ function normalizeText(text) {
 }
 
 
+// ============================================================
+// VISIBILITY
+// ============================================================
+
 function isVisible(element) {
 
     if (!element) {
@@ -93,9 +118,7 @@ function isVisible(element) {
     }
 
     const style =
-        window.getComputedStyle(
-            element
-        );
+        window.getComputedStyle(element);
 
     if (
         style.display === "none" ||
@@ -114,6 +137,74 @@ function isVisible(element) {
     );
 }
 
+
+// ============================================================
+// VIEWPORT CHECK
+// ============================================================
+//
+// IMPORTANT:
+//
+// An element can be:
+//   - visible in the document
+//   - but outside the current viewport.
+//
+// Previously those elements were discarded from safe DOM.
+//
+// Now they remain available to the planner with:
+//   in_viewport: true / false
+//
+// This allows the planner to recognize an off-screen Submit
+// button and return a SCROLL action.
+// ============================================================
+
+function isInViewport(rect) {
+
+    if (!rect) {
+        return false;
+    }
+
+    return (
+        rect.bottom > 0 &&
+        rect.right > 0 &&
+        rect.top < window.innerHeight &&
+        rect.left < window.innerWidth
+    );
+}
+
+
+// ============================================================
+// DOCUMENT POSITION
+// ============================================================
+
+function getDocumentCoordinates(rect) {
+
+    if (!rect) {
+        return {
+            x: 0,
+            y: 0
+        };
+    }
+
+    return {
+
+        x:
+            Math.round(
+                rect.left +
+                window.scrollX
+            ),
+
+        y:
+            Math.round(
+                rect.top +
+                window.scrollY
+            )
+    };
+}
+
+
+// ============================================================
+// NUMERIC VALUE
+// ============================================================
 
 function getNumericValue(value) {
 
@@ -167,9 +258,6 @@ function luhnCheck(number) {
         alternate =
             !alternate;
     }
-
-    alternate =
-        !alternate;
 
     return (
         sum % 10 === 0
@@ -243,18 +331,6 @@ function isAadhaarCandidate(
      * --------------------------------------------------------
      * CHECK AFTER MATCH
      * --------------------------------------------------------
-     *
-     * This is the critical fix.
-     *
-     * For:
-     *
-     * 4111 1111 1111 1111
-     *
-     * a 12-digit substring could previously look like:
-     *
-     * 4111 1111 1111
-     *
-     * We now reject it because another digit group follows.
      */
 
     const afterStart =
@@ -274,17 +350,6 @@ function isAadhaarCandidate(
     ) {
         return false;
     }
-
-
-    /*
-     * Reject another number separator followed by digits.
-     *
-     * Example:
-     *
-     * 4111 1111 1111 1111
-     *
-     * The match must not stop before the final group.
-     */
 
     if (
         /^\s*[- ]\s*\d/.test(
@@ -322,22 +387,21 @@ function isAadhaarCandidate(
     const surrounding =
         `${tokenBefore}${match}${tokenAfter}`;
 
-    /*
-     * If the surrounding area is clearly a long
-     * payment-card-like sequence, reject Aadhaar.
-     */
-
     const surroundingDigits =
         getNumericValue(
             surrounding
         );
+
+    /*
+     * If the surrounding area is clearly a long
+     * payment-card-like sequence, reject Aadhaar.
+     */
 
     if (
         surroundingDigits.length > 12
     ) {
         return false;
     }
-
 
     return true;
 }
@@ -441,16 +505,17 @@ function addDetection(
                 ? element.tagName
                 : "",
 
-        rect: rect
-            ? {
-                left: rect.left,
-                top: rect.top,
-                right: rect.right,
-                bottom: rect.bottom,
-                width: rect.width,
-                height: rect.height
-            }
-            : null
+        rect:
+            rect
+                ? {
+                    left: rect.left,
+                    top: rect.top,
+                    right: rect.right,
+                    bottom: rect.bottom,
+                    width: rect.width,
+                    height: rect.height
+                }
+                : null
     });
 }
 
@@ -638,8 +703,7 @@ function detectPasswordField(
         (
             element.type ||
             ""
-        ).toLowerCase()
-        !== "password"
+        ).toLowerCase() !== "password"
     ) {
         return;
     }
@@ -671,6 +735,15 @@ function detectPasswordField(
 function detectDOMPII() {
 
     resetDetections();
+
+
+    // ========================================================
+    // BODY CHECK
+    // ========================================================
+
+    if (!document.body) {
+        return;
+    }
 
 
     // ========================================================
@@ -774,7 +847,6 @@ function detectDOMPII() {
             const value =
                 field.value || "";
 
-
             /*
              * Value is processed ONLY locally.
              *
@@ -846,6 +918,25 @@ function getSerializableDetections() {
 // ============================================================
 // SAFE DOM EXTRACTION
 // ============================================================
+//
+// IMPORTANT CHANGE:
+//
+// Previously:
+//   elements outside the viewport were discarded.
+//
+// Now:
+//   off-screen elements are retained.
+//
+// The planner receives:
+//
+//   in_viewport: true
+//   in_viewport: false
+//
+// This allows the backend to recognize that a target exists
+// below the current viewport and request a scroll.
+//
+// We still NEVER send input.value.
+// ============================================================
 
 function collectSafeDOM() {
 
@@ -867,11 +958,14 @@ function collectSafeDOM() {
         );
 
 
+    const collected = [];
+
+
     candidates.forEach(
         (element, index) => {
 
             if (
-                elements.length >=
+                collected.length >=
                 SIH_CONFIG.maxDOMElements
             ) {
                 return;
@@ -891,19 +985,14 @@ function collectSafeDOM() {
                 return;
             }
 
+
             const rect =
                 element.getBoundingClientRect();
 
-            if (
-                rect.bottom < 0 ||
-                rect.right < 0 ||
-                rect.top >
-                    window.innerHeight ||
-                rect.left >
-                    window.innerWidth
-            ) {
-                return;
-            }
+            const inViewport =
+                isInViewport(
+                    rect
+                );
 
 
             const tag =
@@ -935,79 +1024,118 @@ function collectSafeDOM() {
                 ) || "";
 
 
+            // =================================================
+            // BUTTON-LIKE IDENTIFICATION
+            // =================================================
+
+            const isButtonLike =
+                tag === "button" ||
+                tag === "a" ||
+                role === "button" ||
+                role === "link" ||
+                (
+                    tag === "input" &&
+                    (
+                        type.toLowerCase() ===
+                            "submit" ||
+                        type.toLowerCase() ===
+                            "button" ||
+                        type.toLowerCase() ===
+                            "reset"
+                    )
+                );
+
+
+            // =================================================
+            // SAFE TEXT
+            // =================================================
+
             let text = "";
 
-if (
-    tag === "button" ||
-    tag === "a" ||
-    tag === "label" ||
-    role === "button" ||
-    role === "link"
-) {
-    text =
-        normalizeText(
-            element.innerText ||
-            element.textContent ||
-            ""
-        );
-}
+            if (
+                tag === "button" ||
+                tag === "a" ||
+                tag === "label" ||
+                role === "button" ||
+                role === "link"
+            ) {
 
-/*
- * SAFE SUBMIT CONTROL METADATA
- *
- * IMPORTANT:
- * We do NOT read input.value for normal inputs.
- *
- * For button-like input controls only, the HTML
- * value attribute is UI metadata such as:
- *
- *     <input type="submit" value="Submit">
- *
- * This does not expose a user's entered form value.
- */
-if (
-    tag === "input" &&
-    (
-        type.toLowerCase() === "submit" ||
-        type.toLowerCase() === "button" ||
-        type.toLowerCase() === "reset"
-    )
-) {
-    text =
-        normalizeText(
-            element.getAttribute("value") ||
-            ""
-        );
-}
+                text =
+                    normalizeText(
+                        element.innerText ||
+                        element.textContent ||
+                        ""
+                    );
+            }
 
 
             /*
-             * NEVER send input.value.
+             * SAFE SUBMIT CONTROL METADATA
+             *
+             * For button-like input controls only,
+             * the HTML value attribute is UI metadata.
+             *
+             * We NEVER read input.value.
              */
 
-            let label =
-    ariaLabel ||
-    name ||
-    placeholder ||
-    "";
+            if (
+                tag === "input" &&
+                (
+                    type.toLowerCase() ===
+                        "submit" ||
+                    type.toLowerCase() ===
+                        "button" ||
+                    type.toLowerCase() ===
+                        "reset"
+                )
+            ) {
 
-if (
-    tag === "input" &&
-    (
-        type.toLowerCase() === "submit" ||
-        type.toLowerCase() === "button" ||
-        type.toLowerCase() === "reset"
-    )
-) {
-    label =
-        text ||
-        label;
-}
+                text =
+                    normalizeText(
+                        element.getAttribute(
+                            "value"
+                        ) || ""
+                    );
+            }
+
+
+            // =================================================
+            // SAFE LABEL
+            // =================================================
+
+            let label =
+                ariaLabel ||
+                name ||
+                placeholder ||
+                "";
 
 
             if (
-                type.toLowerCase()
-                === "password"
+                tag === "input" &&
+                (
+                    type.toLowerCase() ===
+                        "submit" ||
+                    type.toLowerCase() ===
+                        "button" ||
+                    type.toLowerCase() ===
+                        "reset"
+                )
+            ) {
+
+                label =
+                    text ||
+                    label;
+            }
+
+
+            /*
+             * Do not expose the word "password" unnecessarily
+             * in ordinary metadata.
+             */
+
+            if (
+                type.toLowerCase() ===
+                "password"
             ) {
 
                 label =
@@ -1018,7 +1146,21 @@ if (
             }
 
 
-            elements.push({
+            // =================================================
+            // DOCUMENT COORDINATES
+            // =================================================
+
+            const documentPosition =
+                getDocumentCoordinates(
+                    rect
+                );
+
+
+            // =================================================
+            // COLLECT SAFE METADATA
+            // =================================================
+
+            collected.push({
 
                 index,
 
@@ -1058,23 +1200,213 @@ if (
                 height:
                     Math.round(
                         rect.height
-                    )
+                    ),
+
+                in_viewport:
+                    inViewport,
+
+                document_x:
+                    documentPosition.x,
+
+                document_y:
+                    documentPosition.y,
+
+                is_button:
+                    isButtonLike
             });
+        }
+    );
+
+
+    // ========================================================
+    // PRIORITIZE CURRENTLY VISIBLE ELEMENTS
+    // ========================================================
+    //
+    // Visible controls are more immediately actionable.
+    //
+    // Among off-screen controls, button-like controls are
+    // prioritized so things such as Submit remain available
+    // to the planner even on long forms.
+    // ========================================================
+
+    collected.sort(
+        (a, b) => {
+
+            if (
+                a.in_viewport !==
+                b.in_viewport
+            ) {
+
+                return a.in_viewport
+                    ? -1
+                    : 1;
+            }
+
+            if (
+                a.is_button !==
+                b.is_button
+            ) {
+
+                return a.is_button
+                    ? -1
+                    : 1;
+            }
+
+            return (
+                a.document_y -
+                b.document_y
+            );
+        }
+    );
+
+
+    const limited =
+        collected.slice(
+            0,
+            SIH_CONFIG.maxDOMElements
+        );
+
+
+    // Reassign stable indexes after sorting.
+    limited.forEach(
+        (element, index) => {
+
+            element.index =
+                index;
         }
     );
 
 
     console.log(
         "🧩 Safe DOM elements:",
-        elements.length
+        limited.length
     );
 
-    return elements;
+    console.log(
+        "👁️ In viewport:",
+        limited.filter(
+            element =>
+                element.in_viewport
+        ).length
+    );
+
+    console.log(
+        "↕️ Off-screen:",
+        limited.filter(
+            element =>
+                !element.in_viewport
+        ).length
+    );
+
+
+    return limited;
+}
+
+
+// ============================================================
+// FIND ELEMENT METADATA
+// ============================================================
+
+function getElementMetadata(
+    element
+) {
+
+    if (!element) {
+        return null;
+    }
+
+    const rect =
+        element.getBoundingClientRect();
+
+    const tag =
+        element.tagName
+            ? element.tagName.toLowerCase()
+            : "";
+
+    const type =
+        element.getAttribute(
+            "type"
+        ) || "";
+
+    const role =
+        element.getAttribute(
+            "role"
+        ) || "";
+
+    const name =
+        element.getAttribute(
+            "name"
+        ) || "";
+
+    const id =
+        element.getAttribute(
+            "id"
+        ) || "";
+
+    const placeholder =
+        element.getAttribute(
+            "placeholder"
+        ) || "";
+
+    const ariaLabel =
+        element.getAttribute(
+            "aria-label"
+        ) || "";
+
+    return {
+
+        tag,
+
+        type,
+
+        role,
+
+        name,
+
+        id,
+
+        placeholder,
+
+        ariaLabel,
+
+        x:
+            Math.round(
+                rect.left
+            ),
+
+        y:
+            Math.round(
+                rect.top
+            ),
+
+        width:
+            Math.round(
+                rect.width
+            ),
+
+        height:
+            Math.round(
+                rect.height
+            ),
+
+        in_viewport:
+            isInViewport(
+                rect
+            )
+    };
 }
 
 
 // ============================================================
 // PRIVACY OVERLAYS
+// ============================================================
+//
+// These functions remain available for compatibility.
+//
+// IMPORTANT:
+// runPrivacyEngine() DOES NOT call createPrivacyOverlays().
+//
+// Therefore the webpage remains completely normal.
 // ============================================================
 
 function removePrivacyOverlays() {
@@ -1261,15 +1593,20 @@ function runPrivacyEngine() {
     }
 
 
-    privacyEngineRunning = true;
+    privacyEngineRunning =
+        true;
 
 
     try {
 
         detectDOMPII();
 
-        // Keep the webpage completely normal.
-        // PII masking is applied ONLY to captured screenshots.
+        /*
+         * Keep webpage completely normal.
+         *
+         * PII masking is applied ONLY to captured screenshots.
+         */
+
         removePrivacyOverlays();
 
     } catch (error) {
@@ -1290,6 +1627,16 @@ function runPrivacyEngine() {
 // ============================================================
 // SCREENSHOT SANITIZATION
 // ============================================================
+//
+// Screenshot coordinates are viewport-relative.
+//
+// The screenshot captured by Chrome represents the current
+// viewport, therefore getBoundingClientRect() coordinates map
+// directly after scaling.
+//
+// Only detections belonging to the captured viewport are useful.
+// Off-screen detections are naturally clipped by the canvas.
+// ============================================================
 
 function sanitizeScreenshot(
     screenshot,
@@ -1303,6 +1650,20 @@ function sanitizeScreenshot(
         ) => {
 
             try {
+
+                if (
+                    !screenshot
+                ) {
+
+                    reject(
+                        new Error(
+                            "Screenshot data is missing"
+                        )
+                    );
+
+                    return;
+                }
+
 
                 const image =
                     new Image();
@@ -1336,6 +1697,18 @@ function sanitizeScreenshot(
                                 );
 
 
+                            if (!context) {
+
+                                reject(
+                                    new Error(
+                                        "Could not create canvas context"
+                                    )
+                                );
+
+                                return;
+                            }
+
+
                             context.drawImage(
                                 image,
                                 0,
@@ -1348,6 +1721,21 @@ function sanitizeScreenshot(
 
                             const viewportHeight =
                                 window.innerHeight;
+
+
+                            if (
+                                viewportWidth <= 0 ||
+                                viewportHeight <= 0
+                            ) {
+
+                                reject(
+                                    new Error(
+                                        "Invalid viewport dimensions"
+                                    )
+                                );
+
+                                return;
+                            }
 
 
                             const scaleX =
@@ -1363,6 +1751,7 @@ function sanitizeScreenshot(
                                 detection => {
 
                                     if (
+                                        !detection ||
                                         !detection.rect
                                     ) {
                                         return;
@@ -1373,34 +1762,78 @@ function sanitizeScreenshot(
                                         detection.rect;
 
 
+                                    /*
+                                     * Ignore detections that are
+                                     * completely outside the current
+                                     * viewport.
+                                     */
+
+                                    if (
+                                        rect.right <= 0 ||
+                                        rect.bottom <= 0 ||
+                                        rect.left >= viewportWidth ||
+                                        rect.top >= viewportHeight
+                                    ) {
+                                        return;
+                                    }
+
+
+                                    const clippedLeft =
+                                        Math.max(
+                                            0,
+                                            rect.left
+                                        );
+
+                                    const clippedTop =
+                                        Math.max(
+                                            0,
+                                            rect.top
+                                        );
+
+                                    const clippedRight =
+                                        Math.min(
+                                            viewportWidth,
+                                            rect.right
+                                        );
+
+                                    const clippedBottom =
+                                        Math.min(
+                                            viewportHeight,
+                                            rect.bottom
+                                        );
+
+
                                     const x =
                                         Math.max(
                                             0,
-                                            rect.left *
+                                            clippedLeft *
                                             scaleX
                                         );
-
 
                                     const y =
                                         Math.max(
                                             0,
-                                            rect.top *
+                                            clippedTop *
                                             scaleY
                                         );
-
 
                                     const width =
                                         Math.max(
                                             1,
-                                            rect.width *
+                                            (
+                                                clippedRight -
+                                                clippedLeft
+                                            ) *
                                             scaleX
                                         );
-
 
                                     const height =
                                         Math.max(
                                             1,
-                                            rect.height *
+                                            (
+                                                clippedBottom -
+                                                clippedTop
+                                            ) *
                                             scaleY
                                         );
 
@@ -1478,7 +1911,6 @@ function isPointInsideDetection(
                 return false;
             }
 
-
             return (
                 x >= rect.left &&
                 x <= rect.right &&
@@ -1487,6 +1919,87 @@ function isPointInsideDetection(
             );
         }
     );
+}
+
+
+// ============================================================
+// CHECK WHETHER POINT IS IN VIEWPORT
+// ============================================================
+
+function isPointInViewport(
+    x,
+    y
+) {
+
+    return (
+        Number.isFinite(
+            Number(x)
+        ) &&
+        Number.isFinite(
+            Number(y)
+        ) &&
+        Number(x) >= 0 &&
+        Number(y) >= 0 &&
+        Number(x) <= window.innerWidth &&
+        Number(y) <= window.innerHeight
+    );
+}
+
+
+// ============================================================
+// SCROLL TO ELEMENT
+// ============================================================
+//
+// This helper is intentionally local.
+//
+// It can be used when the extension has an actual DOM target.
+//
+// The current planner architecture normally returns a scroll
+// action first, after which popup.js captures and sanitizes the
+// new viewport again.
+//
+// ============================================================
+
+function scrollElementIntoView(
+    element
+) {
+
+    if (!element) {
+
+        return {
+            success: false,
+            error:
+                "Element not found"
+        };
+    }
+
+
+    try {
+
+        element.scrollIntoView(
+            {
+                behavior: "smooth",
+                block: "center",
+                inline: "center"
+            }
+        );
+
+
+        return {
+            success: true,
+            action: "scroll",
+            message:
+                "Element scrolled into view"
+        };
+
+    } catch (error) {
+
+        return {
+            success: false,
+            error:
+                error.message
+        };
+    }
 }
 
 
@@ -1535,6 +2048,61 @@ function executeClick(
         };
     }
 
+
+    /*
+     * IMPORTANT:
+     *
+     * If the planner tries to click outside the current
+     * viewport, do NOT fabricate a click.
+     *
+     * The correct action is to ask the planner to scroll.
+     *
+     * popup.js will then capture the new viewport, sanitize it,
+     * and ask the planner again.
+     */
+
+    if (
+        !isPointInViewport(
+            x,
+            y
+        )
+    ) {
+
+        console.warn(
+            "↕️ Click target is outside current viewport:",
+            {
+                x,
+                y,
+                viewportWidth:
+                    window.innerWidth,
+                viewportHeight:
+                    window.innerHeight
+            }
+        );
+
+
+        return {
+
+            success: false,
+
+            action:
+                "scroll_required",
+
+            error:
+                "Click target is outside the current viewport",
+
+            x,
+
+            y
+        };
+    }
+
+
+    /*
+     * Privacy protection:
+     *
+     * Never click directly inside a protected PII detection.
+     */
 
     if (
         isPointInsideDetection(
@@ -1614,7 +2182,8 @@ function executeClick(
 
         success: true,
 
-        action: "click",
+        action:
+            "click",
 
         element:
             clickable.tagName,
@@ -1636,21 +2205,15 @@ function executeClick(
 // ============================================================
 // EXECUTE TYPE
 // ============================================================
-
-// ============================================================
-// EXECUTE TYPE
-// ============================================================
 //
 // Privacy model:
 //
-// 1. The agent receives only SAFE DOM metadata.
-// 2. The value to type comes explicitly from the user's task.
-// 3. The existing value of the field is NEVER sent to the server.
-// 4. Screenshot PII redaction still happens locally.
-// 5. Password / credential / OTP fields are ALWAYS blocked.
-// 6. Normal fields such as Full Name, Email and Phone can be
-//    edited locally when explicitly requested by the user.
-//
+// 1. Agent receives only SAFE DOM metadata.
+// 2. Value to type comes explicitly from user's task.
+// 3. Existing value is NEVER sent to server.
+// 4. Screenshot PII redaction happens locally.
+// 5. Password / credential / OTP fields are blocked.
+// 6. Normal requested fields can be edited locally.
 // ============================================================
 
 function executeType(
@@ -1669,7 +2232,9 @@ function executeType(
     ) {
 
         return {
+
             success: false,
+
             error:
                 "Type target coordinates missing"
         };
@@ -1687,9 +2252,46 @@ function executeType(
     ) {
 
         return {
+
             success: false,
+
             error:
                 "Type value is empty"
+        };
+    }
+
+
+    // ========================================================
+    // VALIDATE VIEWPORT
+    // ========================================================
+
+    const x =
+        Number(target.x);
+
+    const y =
+        Number(target.y);
+
+
+    if (
+        !isPointInViewport(
+            x,
+            y
+        )
+    ) {
+
+        return {
+
+            success: false,
+
+            action:
+                "scroll_required",
+
+            error:
+                "Type target is outside the current viewport",
+
+            x,
+
+            y
         };
     }
 
@@ -1700,15 +2302,17 @@ function executeType(
 
     const element =
         document.elementFromPoint(
-            Number(target.x),
-            Number(target.y)
+            x,
+            y
         );
 
 
     if (!element) {
 
         return {
+
             success: false,
+
             error:
                 "No element found at type coordinates"
         };
@@ -1728,7 +2332,9 @@ function executeType(
     if (!input) {
 
         return {
+
             success: false,
+
             error:
                 "Target is not an input or textarea"
         };
@@ -1740,11 +2346,11 @@ function executeType(
     // ========================================================
     //
     // IMPORTANT:
+    //
     // We intentionally DO NOT read input.value.
     //
-    // These attributes are safe metadata used only to
-    // enforce the local privacy policy.
-    //
+    // These attributes are safe metadata used only to enforce
+    // the local privacy policy.
     // ========================================================
 
     const inputType =
@@ -1812,13 +2418,6 @@ function executeType(
     // ========================================================
     // HARD PRIVACY BLOCK
     // ========================================================
-    //
-    // These fields must NEVER be automatically typed into.
-    //
-    // This remains true even if the user task accidentally
-    // points the agent at them.
-    //
-    // ========================================================
 
     const isPasswordField =
         inputType === "password";
@@ -1861,7 +2460,9 @@ function executeType(
         );
 
         return {
+
             success: false,
+
             error:
                 "Typing into password, credential or OTP fields is blocked"
         };
@@ -1877,7 +2478,9 @@ function executeType(
     ) {
 
         return {
+
             success: false,
+
             error:
                 "Target input is disabled"
         };
@@ -1889,7 +2492,9 @@ function executeType(
     ) {
 
         return {
+
             success: false,
+
             error:
                 "Target input is read-only"
         };
@@ -1900,30 +2505,33 @@ function executeType(
     // LOCAL PII EDITING
     // ========================================================
     //
-    // IMPORTANT:
+    // A Full Name / Email / Phone field may contain PII.
     //
-    // A Full Name / Email / Phone field may already contain
-    // PII and therefore overlap a local privacy detection.
+    // That does NOT prevent the user from editing it.
     //
-    // That does NOT prevent the user from editing the field.
+    // Existing field value remains inside the browser.
     //
-    // The field's existing value remains inside the browser.
-    //
-    // We do NOT send input.value to the backend.
-    //
-    // The screenshot is still sanitized separately before
-    // being sent to the AI planner.
-    //
+    // We never send input.value to backend.
     // ========================================================
 
     console.log(
         "🔐 Local editable field:",
         {
-            tag: input.tagName,
-            type: inputType || "text",
-            name: inputName,
-            id: inputId,
-            placeholder: inputPlaceholder
+            tag:
+                input.tagName,
+
+            type:
+                inputType ||
+                "text",
+
+            name:
+                inputName,
+
+            id:
+                inputId,
+
+            placeholder:
+                inputPlaceholder
         }
     );
 
@@ -1995,8 +2603,21 @@ function executeType(
     };
 }
 
+
 // ============================================================
 // EXECUTE SCROLL
+// ============================================================
+//
+// The planner can return:
+//
+// {
+//     action: "scroll",
+//     amount: 600
+// }
+//
+// After this action succeeds, popup.js performs another
+// capture + local sanitization + AI planning cycle.
+//
 // ============================================================
 
 function executeScroll(
@@ -2011,7 +2632,8 @@ function executeScroll(
         !Number.isFinite(amount)
     ) {
 
-        amount = 500;
+        amount =
+            SIH_CONFIG.scrollAmount;
     }
 
 
@@ -2025,11 +2647,22 @@ function executeScroll(
         );
 
 
+    console.log(
+        "↕️ Scrolling:",
+        amount
+    );
+
+
     window.scrollBy(
         {
-            top: amount,
-            left: 0,
-            behavior: "smooth"
+            top:
+                amount,
+
+            left:
+                0,
+
+            behavior:
+                "smooth"
         }
     );
 
@@ -2038,7 +2671,8 @@ function executeScroll(
 
         success: true,
 
-        action: "scroll",
+        action:
+            "scroll",
 
         amount
     };
@@ -2063,7 +2697,8 @@ function executeWait(
         )
     ) {
 
-        milliseconds = 1000;
+        milliseconds =
+            1000;
     }
 
 
@@ -2081,7 +2716,8 @@ function executeWait(
 
         success: true,
 
-        action: "wait",
+        action:
+            "wait",
 
         delay:
             milliseconds
@@ -2109,27 +2745,55 @@ function executeBrowserAction(
     }
 
 
-    // Backend action schema:
-    // { action, x, y, text, amount, confidence, reason }
-    // Legacy extension schema:
-    // { type, target: { x, y }, value }
-    // Accept both so the privacy engine remains compatible.
+    /*
+     * Backend action schema:
+     *
+     * {
+     *     action,
+     *     x,
+     *     y,
+     *     text,
+     *     amount,
+     *     confidence,
+     *     reason
+     * }
+     *
+     * Legacy extension schema:
+     *
+     * {
+     *     type,
+     *     target: { x, y },
+     *     value
+     * }
+     *
+     * Accept both.
+     */
 
     const actionType =
         action.action ||
         action.type;
 
+
     const target =
         action.target ||
         {
-            x: action.x,
-            y: action.y
+            x:
+                action.x,
+
+            y:
+                action.y
         };
+
 
     const value =
         action.value !== undefined
             ? action.value
             : action.text;
+
+
+    // ========================================================
+    // CLICK
+    // ========================================================
 
     if (
         actionType ===
@@ -2142,6 +2806,10 @@ function executeBrowserAction(
     }
 
 
+    // ========================================================
+    // TYPE
+    // ========================================================
+
     if (
         actionType ===
         "type"
@@ -2153,6 +2821,10 @@ function executeBrowserAction(
         );
     }
 
+
+    // ========================================================
+    // SCROLL
+    // ========================================================
 
     if (
         actionType ===
@@ -2167,6 +2839,10 @@ function executeBrowserAction(
     }
 
 
+    // ========================================================
+    // WAIT
+    // ========================================================
+
     if (
         actionType ===
         "wait"
@@ -2180,6 +2856,10 @@ function executeBrowserAction(
     }
 
 
+    // ========================================================
+    // NONE
+    // ========================================================
+
     if (
         actionType ===
         "none"
@@ -2189,13 +2869,18 @@ function executeBrowserAction(
 
             success: true,
 
-            action: "none",
+            action:
+                "none",
 
             message:
                 "No browser action required"
         };
     }
 
+
+    // ========================================================
+    // UNKNOWN
+    // ========================================================
 
     return {
 
@@ -2239,6 +2924,10 @@ chrome.runtime.onMessage.addListener(
                 collectSafeDOM();
 
 
+            /*
+             * Never leave visible privacy overlays on the page.
+             */
+
             removePrivacyOverlays();
 
 
@@ -2268,7 +2957,23 @@ chrome.runtime.onMessage.addListener(
                         window.innerHeight,
 
                     devicePixelRatio:
-                        window.devicePixelRatio
+                        window.devicePixelRatio,
+
+                    scrollX:
+                        window.scrollX,
+
+                    scrollY:
+                        window.scrollY,
+
+                    documentWidth:
+                        document.documentElement
+                            ? document.documentElement.scrollWidth
+                            : window.innerWidth,
+
+                    documentHeight:
+                        document.documentElement
+                            ? document.documentElement.scrollHeight
+                            : window.innerHeight
                 }
             });
 
@@ -2286,6 +2991,10 @@ chrome.runtime.onMessage.addListener(
             "SANITIZE_SCREENSHOT"
         ) {
 
+            captureInProgress =
+                true;
+
+
             sanitizeScreenshot(
 
                 message.screenshot,
@@ -2296,6 +3005,10 @@ chrome.runtime.onMessage.addListener(
                     sanitizedImage => {
 
                         runPrivacyEngine();
+
+
+                        captureInProgress =
+                            false;
 
 
                         sendResponse({
@@ -2316,13 +3029,33 @@ chrome.runtime.onMessage.addListener(
                                     window.innerHeight,
 
                                 devicePixelRatio:
-                                    window.devicePixelRatio
+                                    window.devicePixelRatio,
+
+                                scrollX:
+                                    window.scrollX,
+
+                                scrollY:
+                                    window.scrollY,
+
+                                documentWidth:
+                                    document.documentElement
+                                        ? document.documentElement.scrollWidth
+                                        : window.innerWidth,
+
+                                documentHeight:
+                                    document.documentElement
+                                        ? document.documentElement.scrollHeight
+                                        : window.innerHeight
                             }
                         });
                     }
                 )
                 .catch(
                     error => {
+
+                        captureInProgress =
+                            false;
+
 
                         runPrivacyEngine();
 
@@ -2370,6 +3103,168 @@ chrome.runtime.onMessage.addListener(
 
             return true;
         }
+
+
+        // ====================================================
+        // SCROLL TO TARGET
+        // ====================================================
+        //
+        // Optional direct DOM-target scrolling.
+        //
+        // The planner normally uses a regular scroll action,
+        // but this message provides a safe local helper for
+        // future target-aware scrolling.
+        //
+        // It accepts:
+        //
+        // {
+        //     selector: "...",
+        //     targetText: "Submit"
+        // }
+        //
+        // No input values are read.
+        // ====================================================
+
+        if (
+            message.type ===
+            "SCROLL_TO_TARGET"
+        ) {
+
+            let targetElement =
+                null;
+
+
+            if (
+                message.selector
+            ) {
+
+                try {
+
+                    targetElement =
+                        document.querySelector(
+                            message.selector
+                        );
+
+                } catch (_) {
+
+                    targetElement =
+                        null;
+                }
+            }
+
+
+            if (
+                !targetElement &&
+                message.targetText
+            ) {
+
+                const requestedText =
+                    normalizeText(
+                        message.targetText
+                    ).toLowerCase();
+
+
+                const possibleElements =
+                    document.querySelectorAll(
+                        "button, a, input, textarea, [role='button'], [role='link']"
+                    );
+
+
+                for (
+                    const element
+                    of possibleElements
+                ) {
+
+                    if (
+                        !isVisible(element)
+                    ) {
+                        continue;
+                    }
+
+
+                    const tag =
+                        element.tagName
+                            .toLowerCase();
+
+
+                    const type =
+                        (
+                            element.getAttribute(
+                                "type"
+                            ) || ""
+                        ).toLowerCase();
+
+
+                    let text =
+                        normalizeText(
+                            element.innerText ||
+                            element.textContent ||
+                            ""
+                        );
+
+
+                    if (
+                        tag === "input" &&
+                        (
+                            type === "submit" ||
+                            type === "button" ||
+                            type === "reset"
+                        )
+                    ) {
+
+                        text =
+                            normalizeText(
+                                element.getAttribute(
+                                    "value"
+                                ) || ""
+                            );
+                    }
+
+
+                    if (
+                        text
+                            .toLowerCase()
+                            .includes(
+                                requestedText
+                            )
+                    ) {
+
+                        targetElement =
+                            element;
+
+                        break;
+                    }
+                }
+            }
+
+
+            if (!targetElement) {
+
+                sendResponse({
+
+                    success: false,
+
+                    error:
+                        "Target element not found"
+                });
+
+                return true;
+            }
+
+
+            const result =
+                scrollElementIntoView(
+                    targetElement
+                );
+
+
+            sendResponse(
+                result
+            );
+
+
+            return true;
+        }
     }
 );
 
@@ -2400,12 +3295,18 @@ window.addEventListener(
     () => {
 
         updateAllOverlayPositions();
+
     }
 );
 
 
 // ============================================================
 // INPUT EVENT
+// ============================================================
+//
+// Re-run local PII detection after user edits a field.
+//
+// Existing values remain local.
 // ============================================================
 
 document.addEventListener(
@@ -2432,6 +3333,33 @@ document.addEventListener(
 
 
 // ============================================================
+// CHANGE EVENT
+// ============================================================
+
+document.addEventListener(
+    "change",
+    () => {
+
+        clearTimeout(
+            window.__sihPrivacyChangeTimer
+        );
+
+
+        window.__sihPrivacyChangeTimer =
+            setTimeout(
+                () => {
+
+                    runPrivacyEngine();
+
+                },
+                SIH_CONFIG.inputDelay
+            );
+    },
+    true
+);
+
+
+// ============================================================
 // MUTATION OBSERVER
 // ============================================================
 
@@ -2444,7 +3372,8 @@ const privacyObserver =
 
 
             for (
-                const mutation of mutations
+                const mutation
+                of mutations
             ) {
 
                 for (
@@ -2453,11 +3382,16 @@ const privacyObserver =
                 ) {
 
                     if (
-                        node.nodeType !== 1
+                        node.nodeType !==
+                        1
                     ) {
                         continue;
                     }
 
+
+                    /*
+                     * Ignore our own privacy overlays.
+                     */
 
                     if (
                         node.matches &&
@@ -2488,13 +3422,17 @@ const privacyObserver =
                 }
 
 
-                if (relevant) {
+                if (
+                    relevant
+                ) {
                     break;
                 }
             }
 
 
-            if (!relevant) {
+            if (
+                !relevant
+            ) {
                 return;
             }
 
@@ -2520,8 +3458,11 @@ const privacyObserver =
 privacyObserver.observe(
     document.documentElement,
     {
-        childList: true,
-        subtree: true
+        childList:
+            true,
+
+        subtree:
+            true
     }
 );
 
@@ -2534,12 +3475,26 @@ function initializePrivacyAgent() {
 
     runPrivacyEngine();
 
+    removePrivacyOverlays();
+
 
     console.log(
         "🛡️ SIH Privacy Engine initialized"
     );
+
+    console.log(
+        "👁️ Screenshot-only PII masking active"
+    );
+
+    console.log(
+        "↕️ Off-screen DOM perception enabled"
+    );
 }
 
+
+// ============================================================
+// DOM READY
+// ============================================================
 
 if (
     document.readyState ===
@@ -2550,7 +3505,8 @@ if (
         "DOMContentLoaded",
         initializePrivacyAgent,
         {
-            once: true
+            once:
+                true
         }
     );
 
@@ -2558,4 +3514,3 @@ if (
 
     initializePrivacyAgent();
 }
-

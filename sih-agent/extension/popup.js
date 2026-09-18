@@ -31,7 +31,6 @@
 // - TYPE requires an explicit user-provided value.
 // ============================================================
 
-
 console.log(
     "🟢 SIH Privacy Agent popup loaded"
 );
@@ -66,6 +65,7 @@ const taskInput =
         "taskInput"
     );
 
+
 if (!captureButton) {
 
     console.error(
@@ -79,8 +79,9 @@ if (!taskInput) {
     console.error(
         "❌ Task input not found."
     );
-
 }
+
+
 // ============================================================
 // AGENT CONFIGURATION
 // ============================================================
@@ -495,11 +496,13 @@ function isCaptureQuotaError(
         message.includes(
             "exceeds the max_capture"
         ) ||
-        message.includes(
-            "capturevisibletab"
-        ) &&
-        message.includes(
-            "quota"
+        (
+            message.includes(
+                "capturevisibletab"
+            ) &&
+            message.includes(
+                "quota"
+            )
         ) ||
         message.includes(
             "quota"
@@ -1975,7 +1978,24 @@ async function captureAndAnalyze() {
 
 
             // =================================================
+            // IMPORTANT:
+            //
+            // The newly captured state is now the state the
+            // planner must reason over.
+            // =================================================
+
+            currentCapture =
+                finalCapture;
+
+
+            // =================================================
             // COMPOUND TASK — TYPE → CLICK SUBMIT
+            // =================================================
+            //
+            // After TYPE, switch planner task from the original
+            // compound instruction to the explicit remaining
+            // action: Click Submit.
+            //
             // =================================================
 
             if (
@@ -2040,7 +2060,7 @@ async function captureAndAnalyze() {
 
 
                 console.log(
-                    "➡️ Continuing to STEP 2..."
+                    "➡️ Continuing to next planner step..."
                 );
 
 
@@ -2052,6 +2072,92 @@ async function captureAndAnalyze() {
                 // ---------------------------------------------
                 // CONTINUE LOOP
                 // ---------------------------------------------
+
+                continue;
+            }
+
+
+            // =================================================
+            // COMPOUND TASK — SCROLL CONTINUATION
+            // =================================================
+            //
+            // THIS IS THE IMPORTANT FIX.
+            //
+            // If the Submit button is off-screen, the planner
+            // returns SCROLL.
+            //
+            // SCROLL IS NOT THE END OF A COMPOUND TASK.
+            //
+            // The fresh sanitized screenshot above contains the
+            // newly visible page state. We must continue the loop
+            // so the planner can now see and click Submit.
+            //
+            // =================================================
+
+            if (
+                compoundTask &&
+                analysis.actionType === "scroll"
+            ) {
+
+                console.log();
+
+                console.log(
+                    "=========================================="
+                );
+
+                console.log(
+                    "🔄 COMPOUND TASK SCROLL CONTINUATION"
+                );
+
+                console.log(
+                    "=========================================="
+                );
+
+
+                console.log(
+                    "✅ SCROLL step completed."
+                );
+
+
+                console.log(
+                    "➡️ Re-planning after scroll..."
+                );
+
+
+                // finalCapture is the fresh sanitized state
+                // captured after the scroll action.
+
+                currentCapture =
+                    finalCapture;
+
+
+                console.log(
+                    "🔒 Fresh sanitized state assigned after scroll."
+                );
+
+
+                console.log(
+                    "📝 Next planner task:",
+                    currentTask
+                );
+
+
+                console.log(
+                    "➡️ Continuing to next planner step..."
+                );
+
+
+                console.log(
+                    "=========================================="
+                );
+
+
+                // IMPORTANT:
+                //
+                // Do NOT show completion here.
+                //
+                // Continue to the next loop iteration so
+                // "Click Submit" is planned and executed.
 
                 continue;
             }
@@ -2356,4 +2462,9 @@ console.log(
 
 console.log(
     "🤖 Compound TYPE → SUBMIT flow enabled"
+);
+
+
+console.log(
+    "📜 Compound SCROLL → CONTINUE flow enabled"
 );
