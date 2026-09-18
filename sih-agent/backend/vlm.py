@@ -1,9 +1,9 @@
+import base64
+import io
+import json
 import os
 import re
-import json
 import time
-import base64
-from io import BytesIO
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -14,30 +14,14 @@ from PIL import Image
 # CONFIGURATION
 # ============================================================
 
-# fast  = local DOM-grounded planner for live demo
-# qwen  = local Qwen2.5-VL visual reasoning
 VLM_MODE = os.getenv("VLM_MODE", "fast").lower().strip()
 
-OLLAMA_URL = os.getenv(
-    "OLLAMA_URL",
-    "http://127.0.0.1:11434/api/chat"
-)
+OLLAMA_URL = "http://127.0.0.1:11434/api/chat"
+MODEL = "qwen2.5vl:3b"
 
-MODEL = os.getenv(
-    "OLLAMA_MODEL",
-    "qwen2.5vl:3b"
-)
-
-OLLAMA_TIMEOUT = int(
-    os.getenv("OLLAMA_TIMEOUT", "120")
-)
-
-MAX_IMAGE_WIDTH = 448
-MAX_IMAGE_HEIGHT = 448
+OLLAMA_TIMEOUT = 120
+MAX_IMAGE_SIZE = 448
 JPEG_QUALITY = 55
-
-NUM_CTX = 1024
-NUM_PREDICT = 48
 
 
 # ============================================================
@@ -45,82 +29,41 @@ NUM_PREDICT = 48
 # ============================================================
 
 SYSTEM_PROMPT = """
-You are a browser computer-use agent.
+You are a privacy-aware browser computer-use agent.
 
 You receive:
 1. A SANITIZED screenshot.
 2. Safe DOM metadata.
-3. Local privacy detections.
+3. A user browser task.
 
-IMPORTANT PRIVACY RULES:
-- The screenshot has already been sanitized locally.
-- Sensitive information may appear as black/redacted regions.
-- Never attempt to reconstruct hidden sensitive information.
-- Never invent passwords, IDs, card numbers, emails, phone numbers,
-  or other private values.
-- Do not type sensitive information unless the task explicitly provides
-  the value and the browser action is clearly requested.
-
-Your job is to select ONE useful browser action.
+The screenshot has already been redacted locally.
+Never request, reconstruct, infer, or expose sensitive values.
 
 Allowed actions:
+- click
+- type
+- scroll
+- wait
+- none
 
-click:
+Return ONLY JSON:
+
 {
   "action": "click",
-  "x": 0,
-  "y": 0,
+  "x": 100,
+  "y": 100,
   "text": "",
   "amount": 0,
   "confidence": 0.0,
-  "reason": ""
+  "reason": "short explanation"
 }
 
-type:
-{
-  "action": "type",
-  "x": 0,
-  "y": 0,
-  "text": "",
-  "amount": 0,
-  "confidence": 0.0,
-  "reason": ""
-}
+For type:
+- text MUST come only from the explicit user task.
+- Never copy a sensitive value from the page.
+- Never type into password/credential fields.
 
-scroll:
-{
-  "action": "scroll",
-  "x": 0,
-  "y": 0,
-  "text": "",
-  "amount": 500,
-  "confidence": 0.0,
-  "reason": ""
-}
-
-wait:
-{
-  "action": "wait",
-  "x": 0,
-  "y": 0,
-  "text": "",
-  "amount": 0,
-  "confidence": 0.0,
-  "reason": ""
-}
-
-none:
-{
-  "action": "none",
-  "x": 0,
-  "y": 0,
-  "text": "",
-  "amount": 0,
-  "confidence": 0.0,
-  "reason": ""
-}
-
-Return ONLY valid JSON.
+If uncertain, return action "none".
 """
 
 
@@ -128,438 +71,1047 @@ Return ONLY valid JSON.
 # IMAGE OPTIMIZATION
 # ============================================================
 
-def optimize_image(screenshot_data_url: str) -> str:
-    """
-    Resize the already-sanitized screenshot before sending it
-    to the local VLM.
-    """
+def optimize_image(encoded_image: str) -> str:
 
-    if not screenshot_data_url:
-        raise ValueError("Empty screenshot data.")
+    try:
+        image_bytes = base64.b64decode(encoded_image)
+        image = Image.open(io.BytesIO(image_bytes))
 
-    if "," in screenshot_data_url:
-        encoded = screenshot_data_url.split(",", 1)[1]
-    else:
-        encoded = screenshot_data_url
+        print(
+            f"[VLM] Original image: "
+            f"{image.width}x{image.height}"
+        )
 
-    raw = base64.b64decode(encoded)
+        image.thumbnail(
+            (MAX_IMAGE_SIZE, MAX_IMAGE_SIZE),
+            Image.Resampling.LANCZOS
+        )
 
-    image = Image.open(BytesIO(raw)).convert("RGB")
+        print(
+            f"[VLM] Optimized image: "
+            f"{image.width}x{image.height}"
+        )
 
-    original_width, original_height = image.size
+        if image.mode not in ("RGB", "L"):
+            image = image.convert("RGB")
 
-    image.thumbnail(
-        (MAX_IMAGE_WIDTH, MAX_IMAGE_HEIGHT),
-        Image.Resampling.LANCZOS
-    )
+        output = io.BytesIO()
 
-    output = BytesIO()
+        image.save(
+            output,
+            format="JPEG",
+            quality=JPEG_QUALITY,
+            optimize=True
+        )
 
-    image.save(
-        output,
-        format="JPEG",
-        quality=JPEG_QUALITY,
-        optimize=True
-    )
+        optimized = output.getvalue()
 
-    optimized_base64 = base64.b64encode(
-        output.getvalue()
-    ).decode("utf-8")
+        print(
+            f"[VLM] Optimized image size: "
+            f"{len(optimized) / 1024:.1f} KB"
+        )
 
-    print(
-        f"[VLM] Original image: "
-        f"{original_width}x{original_height}"
-    )
+        return base64.b64encode(
+            optimized
+        ).decode("utf-8")
 
-    print(
-        f"[VLM] Optimized image: "
-        f"{image.width}x{image.height}"
-    )
+    except Exception as exc:
 
-    print(
-        f"[VLM] Optimized image size: "
-        f"{len(output.getvalue()) / 1024:.1f} KB"
-    )
+        print(
+            f"[VLM] Image optimization failed: {exc}"
+        )
 
-    return optimized_base64
+        return encoded_image
 
 
 # ============================================================
-# TEXT NORMALIZATION
+# TEXT HELPERS
 # ============================================================
 
 def normalize_text(value: Any) -> str:
-    if value is None:
-        return ""
 
     return re.sub(
         r"\s+",
         " ",
-        str(value)
-    ).strip().lower()
+        str(value or "")
+    ).strip()
 
 
-def element_text(element: Dict[str, Any]) -> str:
-    parts = [
-        element.get("text"),
-        element.get("innerText"),
-        element.get("ariaLabel"),
-        element.get("aria_label"),
-        element.get("placeholder"),
-        element.get("name"),
-        element.get("id"),
-        element.get("type"),
-    ]
+def task_lower(task: str) -> str:
 
-    return " ".join(
-        str(x)
-        for x in parts
-        if x
-    )
+    return normalize_text(task).lower()
 
 
-def get_number(
-    element: Dict[str, Any],
-    *keys: str,
-    default: float = 0
-) -> float:
+def extract_explicit_type_value(task: str) -> Optional[str]:
 
-    for key in keys:
-        value = element.get(key)
+    """
+    Extract ONLY text explicitly quoted by the user.
 
-        if isinstance(value, (int, float)):
-            return float(value)
+    Examples:
+        Type "Vansh" in the Full Name field
+        Enter 'hello' into the city field
+        Fill the field with "ABC"
 
-        try:
-            if value is not None:
-                return float(value)
-        except Exception:
-            pass
-
-    return default
-
-
-# ============================================================
-# DOM GEOMETRY
-# ============================================================
-
-def get_element_center(
-    element: Dict[str, Any]
-) -> tuple[float, float]:
-
-    # Direct center coordinates
-    cx = get_number(
-        element,
-        "centerX",
-        "center_x",
-        "cx",
-        default=-1
-    )
-
-    cy = get_number(
-        element,
-        "centerY",
-        "center_y",
-        "cy",
-        default=-1
-    )
-
-    if cx >= 0 and cy >= 0:
-        return cx, cy
-
-    # Bounding rectangle
-    x = get_number(
-        element,
-        "x",
-        "left",
-        default=0
-    )
-
-    y = get_number(
-        element,
-        "y",
-        "top",
-        default=0
-    )
-
-    width = get_number(
-        element,
-        "width",
-        default=0
-    )
-
-    height = get_number(
-        element,
-        "height",
-        default=0
-    )
-
-    return (
-        x + width / 2,
-        y + height / 2
-    )
-
-
-# ============================================================
-# DOM ELEMENT TYPE
-# ============================================================
-
-def is_input(element: Dict[str, Any]) -> bool:
-
-    tag = normalize_text(
-        element.get("tag")
-        or element.get("tagName")
-    )
-
-    element_type = normalize_text(
-        element.get("type")
-    )
-
-    return (
-        tag in {
-            "input",
-            "textarea",
-            "select"
-        }
-        or element_type in {
-            "text",
-            "email",
-            "tel",
-            "password",
-            "number",
-            "search",
-            "url"
-        }
-    )
-
-
-def is_button(element: Dict[str, Any]) -> bool:
-
-    tag = normalize_text(
-        element.get("tag")
-        or element.get("tagName")
-    )
-
-    element_type = normalize_text(
-        element.get("type")
-    )
-
-    text = normalize_text(
-        element_text(element)
-    )
-
-    if tag == "button":
-        return True
-
-    if element_type in {
-        "button",
-        "submit",
-        "reset"
-    }:
-        return True
-
-    button_words = [
-        "submit",
-        "save",
-        "continue",
-        "next",
-        "login",
-        "sign in",
-        "search",
-        "send",
-        "verify"
-    ]
-
-    return any(
-        word in text
-        for word in button_words
-    )
-
-
-# ============================================================
-# TASK KEYWORDS
-# ============================================================
-
-def task_contains(task: str, words: List[str]) -> bool:
-
-    normalized = normalize_text(task)
-
-    return any(
-        word in normalized
-        for word in words
-    )
-
-
-def extract_quoted_text(task: str) -> str:
+    We intentionally do not infer values from the webpage.
+    """
 
     patterns = [
-        r'"([^"]+)"',
-        r"'([^']+)'",
-        r"`([^`]+)`"
+        r"""["“](.*?)["”]""",
+        r"""['‘](.*?)['’]"""
     ]
 
     for pattern in patterns:
+
         match = re.search(
             pattern,
-            task
+            task or "",
+            flags=re.DOTALL
         )
 
         if match:
-            return match.group(1)
 
-    return ""
+            value = normalize_text(
+                match.group(1)
+            )
+
+            if value:
+                return value
+
+    return None
 
 
-# ============================================================
-# ELEMENT MATCHING
-# ============================================================
+def is_type_task(task: str) -> bool:
 
-def score_element(
-    element: Dict[str, Any],
-    task: str
-) -> float:
+    t = task_lower(task)
 
-    task_text = normalize_text(task)
-    element_text_value = normalize_text(
-        element_text(element)
+    type_verbs = (
+        "type ",
+        "enter ",
+        "fill ",
+        "write ",
+        "input ",
+        "insert ",
+        "put "
     )
 
-    if not element_text_value:
-        return -1000
+    target_words = (
+        "field",
+        "input",
+        "textbox",
+        "text box",
+        "form"
+    )
+
+    has_type_verb = any(
+        t.startswith(word) or
+        f" {word}" in t
+        for word in type_verbs
+    )
+
+    has_target = any(
+        word in t
+        for word in target_words
+    )
+
+    has_explicit_value = (
+        extract_explicit_type_value(task)
+        is not None
+    )
+
+    return (
+        has_type_verb and
+        has_target and
+        has_explicit_value
+    )
+
+
+# ============================================================
+# SAFE DOM TARGET HELPERS
+# ============================================================
+
+def dom_text(element: Dict[str, Any]) -> str:
+
+    return normalize_text(
+        " ".join(
+            [
+                str(element.get("label") or ""),
+                str(element.get("text") or ""),
+                str(element.get("aria") or ""),
+                str(element.get("placeholder") or ""),
+                str(element.get("name") or "")
+            ]
+        )
+    )
+
+
+def target_name(element: Dict[str, Any]) -> str:
+
+    return dom_text(element).lower()
+
+
+def element_is_sensitive(
+    element: Dict[str, Any],
+    detections: List[Dict[str, Any]]
+) -> bool:
+
+    tag = str(
+        element.get("tag") or ""
+    ).lower()
+
+    element_type = str(
+        element.get("type") or ""
+    ).lower()
+
+    element_name = target_name(
+        element
+    )
+
+    # --------------------------------------------------------
+    # HARD BLOCK — PASSWORD / CREDENTIAL / OTP CONTROLS
+    # --------------------------------------------------------
+
+    if element_type == "password":
+        return True
+
+    if (
+        "password" in element_name or
+        "credential" in element_name or
+        "otp" in element_name
+    ):
+        return True
+
+    # --------------------------------------------------------
+    # BUTTON SAFETY
+    # --------------------------------------------------------
+    #
+    # Buttons do not contain the user's typed form value.
+    #
+    # Therefore a PII detection elsewhere on the page must
+    # NOT automatically make a normal submit button unsafe.
+    #
+    # This is particularly important for:
+    #
+    # <input type="submit" value="Submit">
+    #
+    # or:
+    #
+    # <button type="submit">Submit</button>
+    #
+    # --------------------------------------------------------
+
+    is_button_like = (
+        tag == "button" or
+        tag == "a" or
+        element_type in (
+            "submit",
+            "button",
+            "reset"
+        ) or
+        str(
+            element.get("role") or ""
+        ).lower()
+        in (
+            "button",
+            "link"
+        )
+    )
+
+    if is_button_like:
+
+        return False
+
+    # --------------------------------------------------------
+    # NORMAL INPUT / TEXTAREA PROTECTION
+    # --------------------------------------------------------
+    #
+    # For editable controls, PII-overlap remains a hard block.
+    #
+    # This prevents the planner from selecting a sensitive
+    # field even if the task asks it to do so.
+    # --------------------------------------------------------
+
+    try:
+
+        x = float(
+            element.get(
+                "x",
+                0
+            ) or 0
+        )
+
+        y = float(
+            element.get(
+                "y",
+                0
+            ) or 0
+        )
+
+        w = float(
+            element.get(
+                "width",
+                0
+            ) or 0
+        )
+
+        h = float(
+            element.get(
+                "height",
+                0
+            ) or 0
+        )
+
+        right = x + w
+
+        bottom = y + h
+
+        for detection in detections:
+
+            rect = (
+                detection.get("rect")
+                or {}
+            )
+
+            dl = float(
+                rect.get(
+                    "left",
+                    detection.get(
+                        "x",
+                        0
+                    )
+                ) or 0
+            )
+
+            dt = float(
+                rect.get(
+                    "top",
+                    detection.get(
+                        "y",
+                        0
+                    )
+                ) or 0
+            )
+
+            dr = float(
+                rect.get(
+                    "right",
+                    dl + float(
+                        rect.get(
+                            "width",
+                            detection.get(
+                                "width",
+                                0
+                            )
+                        ) or 0
+                    )
+                )
+            )
+
+            db = float(
+                rect.get(
+                    "bottom",
+                    dt + float(
+                        rect.get(
+                            "height",
+                            detection.get(
+                                "height",
+                                0
+                            )
+                        ) or 0
+                    )
+                )
+            )
+
+            overlap = (
+                x < dr and
+                right > dl and
+                y < db and
+                bottom > dt
+            )
+
+            if overlap:
+
+                return True
+
+    except Exception:
+
+        pass
+
+    return False
+
+
+def element_center(
+    element: Dict[str, Any]
+) -> tuple[int, int]:
+
+    x = float(element.get("x", 0) or 0)
+    y = float(element.get("y", 0) or 0)
+    w = float(element.get("width", 0) or 0)
+    h = float(element.get("height", 0) or 0)
+
+    return (
+        int(round(x + w / 2)),
+        int(round(y + h / 2))
+    )
+
+
+# ============================================================
+# FIELD MATCHING
+# ============================================================
+
+FIELD_ALIASES = {
+    "full name": [
+        "full name",
+        "name",
+        "applicant name",
+        "citizen name"
+    ],
+    "email": [
+        "email",
+        "email address",
+        "e-mail"
+    ],
+    "phone": [
+        "phone",
+        "mobile",
+        "mobile number",
+        "phone number",
+        "contact number"
+    ],
+    "submit": [
+        "submit",
+        "submit application",
+        "submit form"
+    ]
+}
+
+
+def extract_requested_target(task: str) -> str:
+
+    t = task_lower(task)
+
+    # ========================================================
+    # 1. EXPLICIT FIELD TARGETS
+    # ========================================================
+    #
+    # IMPORTANT:
+    # If the task contains BOTH:
+    #
+    #   "Fill the Full Name field with ..."
+    #   "and submit the form"
+    #
+    # the TYPE planner must resolve "full name",
+    # not "submit".
+    #
+    # ========================================================
+
+    patterns = [
+
+        # Fill the Full Name field
+        r"\bfill\s+(?:the\s+)?([a-z][a-z0-9 _-]*?)\s+field\b",
+
+        # Enter value in the Full Name field
+        r"\b(?:enter|write|input|insert|put)\s+(?:.*?\s+)?in\s+(?:the\s+)?([a-z][a-z0-9 _-]*?)\s+field\b",
+
+        # in the Full Name field
+        r"\bin\s+(?:the\s+)?([a-z][a-z0-9 _-]*?)\s+field\b",
+
+        # into the Full Name field
+        r"\binto\s+(?:the\s+)?([a-z][a-z0-9 _-]*?)\s+field\b",
+
+        # to the Full Name field
+        r"\bto\s+(?:the\s+)?([a-z][a-z0-9 _-]*?)\s+field\b",
+
+        # generic "Full Name field"
+        r"\b([a-z][a-z0-9 _-]*)\s+field\b"
+    ]
+
+
+    for pattern in patterns:
+
+        match = re.search(
+            pattern,
+            t
+        )
+
+        if match:
+
+            candidate = normalize_text(
+                match.group(1)
+            )
+
+            if candidate:
+
+                # --------------------------------------------
+                # Normalize known aliases
+                # --------------------------------------------
+
+                candidate_lower = candidate.lower()
+
+                for canonical, aliases in FIELD_ALIASES.items():
+
+                    for alias in aliases:
+
+                        if (
+                            candidate_lower == alias.lower()
+                            or alias.lower() in candidate_lower
+                        ):
+                            return canonical
+
+                return candidate
+
+
+    # ========================================================
+    # 2. SUBMIT / BUTTON TARGET
+    # ========================================================
+
+    submit_patterns = [
+
+        r"\bclick\s+(?:the\s+)?submit\b",
+
+        r"\bpress\s+(?:the\s+)?submit\b",
+
+        r"\bselect\s+(?:the\s+)?submit\b",
+
+        r"\bsubmit\s+(?:the\s+)?form\b",
+
+        r"\bsubmit\s+(?:the\s+)?application\b"
+    ]
+
+
+    for pattern in submit_patterns:
+
+        if re.search(
+            pattern,
+            t
+        ):
+
+            return "submit"
+
+
+    # ========================================================
+    # 3. FIELD ALIASES
+    # ========================================================
+
+    for canonical, aliases in FIELD_ALIASES.items():
+
+        for alias in aliases:
+
+            if alias.lower() in t:
+
+                return canonical
+
+
+    # ========================================================
+    # 4. NOTHING FOUND
+    # ========================================================
+
+    return ""
+def score_element_for_target(
+    element: Dict[str, Any],
+    target: str
+) -> float:
+
+    target_text = (
+        str(target or "")
+        .lower()
+        .strip()
+    )
+
+    if not target_text:
+        return 0.0
+
+    tag = (
+        str(element.get("tag") or "")
+        .lower()
+        .strip()
+    )
+
+    element_type = (
+        str(element.get("type") or "")
+        .lower()
+        .strip()
+    )
+
+    role = (
+        str(element.get("role") or "")
+        .lower()
+        .strip()
+    )
+
+    name = (
+        str(element.get("name") or "")
+        .lower()
+        .strip()
+    )
+
+    element_id = (
+        str(element.get("id") or "")
+        .lower()
+        .strip()
+    )
+
+    placeholder = (
+        str(element.get("placeholder") or "")
+        .lower()
+        .strip()
+    )
+
+    aria_label = (
+        str(element.get("aria-label") or "")
+        .lower()
+        .strip()
+    )
+
+    title = (
+        str(element.get("title") or "")
+        .lower()
+        .strip()
+    )
+
+    value = (
+        str(element.get("value") or "")
+        .lower()
+        .strip()
+    )
+
+    text = (
+        str(
+            element.get("text")
+            or element.get("text_content")
+            or element.get("inner_text")
+            or ""
+        )
+        .lower()
+        .strip()
+    )
+
+    # ---------------------------------------------------------
+    # SPECIAL CASE — SUBMIT
+    # ---------------------------------------------------------
+
+    if target_text in (
+        "submit",
+        "submit button",
+        "submit form",
+        "submission"
+    ):
+
+        score = 0.0
+
+        # Explicit submit input type
+        if (
+            tag == "input"
+            and element_type == "submit"
+        ):
+            score += 100
+
+        # Button element
+        if tag == "button":
+            score += 40
+
+        # Button/link role
+        if role == "button":
+            score += 35
+
+        # Text / value containing submit
+        searchable_fields = [
+            text,
+            value,
+            name,
+            element_id,
+            aria_label,
+            title
+        ]
+
+        for field in searchable_fields:
+
+            if "submit" in field:
+                score += 30
+
+        # Common submit-related names
+        if (
+            "submit" in name
+            or "submit" in element_id
+            or "submit" in aria_label
+            or "submit" in title
+        ):
+            score += 20
+
+        if score > 0:
+
+            print(
+                "[SUBMIT MATCH]",
+                {
+                    "tag": tag,
+                    "type": element_type,
+                    "role": role,
+                    "text": text,
+                    "value": value,
+                    "name": name,
+                    "id": element_id,
+                    "aria-label": aria_label,
+                    "score": score
+                }
+            )
+
+        return score
+
+
+    # ---------------------------------------------------------
+    # NORMAL TARGET MATCHING
+    # ---------------------------------------------------------
 
     score = 0.0
 
-    # --------------------------------------------------------
-    # Exact task words
-    # --------------------------------------------------------
+    target_words = [
+        word
+        for word in target_text.split()
+        if word
+    ]
 
-    task_words = set(
-        re.findall(
-            r"[a-zA-Z0-9]+",
-            task_text
-        )
-    )
+    searchable_fields = [
+        ("text", text, 50),
+        ("aria-label", aria_label, 45),
+        ("placeholder", placeholder, 40),
+        ("name", name, 35),
+        ("id", element_id, 30),
+        ("title", title, 30),
+        ("value", value, 25)
+    ]
 
-    element_words = set(
-        re.findall(
-            r"[a-zA-Z0-9]+",
-            element_text_value
-        )
-    )
+    for field_name, field_value, field_score in searchable_fields:
 
-    common_words = task_words & element_words
+        if not field_value:
+            continue
 
-    score += len(common_words) * 12
+        # Exact match
+        if field_value == target_text:
 
-    # --------------------------------------------------------
-    # Semantic field matching
-    # --------------------------------------------------------
+            score += field_score
 
-    semantic_groups = {
-        "name": [
-            "name",
-            "full name",
-            "first name",
-            "last name"
-        ],
-        "email": [
-            "email",
-            "e-mail",
-            "mail"
-        ],
-        "phone": [
-            "phone",
-            "mobile",
-            "telephone",
-            "contact"
-        ],
-        "address": [
-            "address",
-            "location"
-        ],
-        "password": [
-            "password",
-            "passcode"
-        ],
-        "aadhaar": [
-            "aadhaar",
-            "aadhar"
-        ],
-        "pan": [
-            "pan",
-            "permanent account"
-        ],
-        "card": [
-            "card",
-            "credit card",
-            "debit card"
-        ],
-        "submit": [
-            "submit",
-            "save",
-            "continue",
-            "next",
-            "send"
-        ]
-    }
+        # Target contained in field
+        elif target_text in field_value:
 
-    for group, keywords in semantic_groups.items():
+            score += field_score * 0.8
 
-        if any(
-            keyword in task_text
-            for keyword in keywords
-        ):
+        # Individual target words
+        else:
 
-            if any(
-                keyword in element_text_value
-                for keyword in keywords
-            ):
-                score += 35
+            matched_words = sum(
+                1
+                for word in target_words
+                if word in field_value
+            )
 
-    # --------------------------------------------------------
-    # Input/button compatibility
-    # --------------------------------------------------------
+            if matched_words:
+                score += (
+                    field_score *
+                    (
+                        matched_words /
+                        len(target_words)
+                    ) *
+                    0.6
+                )
 
-    if task_contains(
-        task,
-        ["click", "press", "select", "open", "tap"]
+    # Input fields get a small preference
+    if tag in (
+        "input",
+        "textarea"
     ):
-
-        if is_button(element):
-            score += 15
-
-        if is_input(element):
-            score += 8
-
-    # --------------------------------------------------------
-    # Type compatibility
-    # --------------------------------------------------------
-
-    if task_contains(
-        task,
-        ["type", "enter", "fill", "write"]
-    ):
-
-        if is_input(element):
-            score += 25
-
-    # --------------------------------------------------------
-    # Submit compatibility
-    # --------------------------------------------------------
-
-    if task_contains(
-        task,
-        ["submit", "send", "continue", "next"]
-    ):
-
-        if is_button(element):
-            score += 40
+        score += 5
 
     return score
 
 
+def find_best_element(
+    dom_elements: List[Dict[str, Any]],
+    target: str,
+    detections: List[Dict[str, Any]],
+    require_input: bool = False,
+    require_button: bool = False
+) -> Optional[Dict[str, Any]]:
+    print()
+    print("========== DOM ELEMENTS RECEIVED ==========")
+
+    for i, element in enumerate(dom_elements):
+
+        print(
+        f"[DOM {i}]",
+        {
+            "tag": element.get("tag"),
+            "type": element.get("type"),
+            "role": element.get("role"),
+            "text": element.get("text"),
+            "text_content": element.get("text_content"),
+            "inner_text": element.get("inner_text"),
+            "name": element.get("name"),
+            "id": element.get("id"),
+            "aria-label": element.get("aria-label"),
+            "placeholder": element.get("placeholder"),
+            "value": element.get("value")
+        }
+    )
+
+    print("==========================================")
+    candidates = []
+
+    print()
+    print(
+        "[FIND ELEMENT] "
+        f"target='{target}' "
+        f"require_input={require_input} "
+        f"require_button={require_button}"
+    )
+
+    # ========================================================
+    # CHECK EVERY SAFE DOM ELEMENT
+    # ========================================================
+
+    for element in dom_elements:
+
+        tag = str(
+            element.get("tag") or ""
+        ).lower()
+
+        element_type = str(
+            element.get("type") or ""
+        ).lower()
+
+        role = str(
+            element.get("role") or ""
+        ).lower()
+
+
+        # ====================================================
+        # INPUT FILTER
+        # ====================================================
+
+        if require_input:
+
+            if tag not in (
+                "input",
+                "textarea"
+            ):
+                continue
+
+
+        # ====================================================
+        # BUTTON FILTER
+        # ====================================================
+
+        if require_button:
+
+            is_button = (
+                tag in (
+                    "button",
+                    "a"
+                )
+                or (
+                    tag == "input"
+                    and element_type in (
+                        "submit",
+                        "button",
+                        "reset"
+                    )
+                )
+                or role in (
+                    "button",
+                    "link"
+                )
+            )
+
+            if not is_button:
+                continue
+
+
+        # ====================================================
+        # PRIVACY CHECK
+        # ====================================================
+        #
+        # Password / credential / OTP fields are ALWAYS
+        # blocked.
+        #
+        # Other PII-containing editable fields may be used
+        # for explicit user-requested local editing.
+        #
+        # Their existing values are NOT sent in DOM metadata.
+        # ====================================================
+
+        is_sensitive = element_is_sensitive(
+            element,
+            detections
+        )
+
+        if is_sensitive:
+
+            element_name = target_name(
+                element
+            ).lower()
+
+            # ----------------------------------------------
+            # HARD BLOCK: PASSWORD / CREDENTIAL / OTP
+            # ----------------------------------------------
+
+            if (
+                element_type == "password"
+                or "password" in element_name
+                or "credential" in element_name
+                or "otp" in element_name
+            ):
+
+                print(
+                    "[PRIVACY] BLOCKED sensitive control:",
+                    {
+                        "tag": tag,
+                        "type": element_type,
+                        "label": element.get("label"),
+                        "text": element.get("text")
+                    }
+                )
+
+                continue
+
+
+            # ----------------------------------------------
+            # EXPLICIT EDITABLE FIELD
+            # ----------------------------------------------
+            #
+            # For an explicitly requested normal field such
+            # as Full Name / Email / Phone, allow target
+            # resolution using SAFE DOM metadata.
+            #
+            # The actual field value is never read here.
+            # ----------------------------------------------
+
+            if require_input:
+
+                print(
+                    "[PRIVACY] Allowing explicit "
+                    "editable-field target resolution:",
+                    {
+                        "tag": tag,
+                        "type": element_type,
+                        "label": element.get("label"),
+                        "text": element.get("text")
+                    }
+                )
+
+            else:
+
+                continue
+
+
+        # ====================================================
+        # SCORE TARGET
+        # ====================================================
+
+        score = score_element_for_target(
+            element,
+            target
+        )
+
+
+        # ====================================================
+        # ACCEPT CANDIDATE
+        # ====================================================
+
+        if score > 0:
+
+            candidates.append(
+                (
+                    score,
+                    element
+                )
+            )
+
+            # ----------------------------------------------
+            # DEBUG LOG
+            # ----------------------------------------------
+
+            if require_button:
+
+                print(
+                    "[BUTTON CANDIDATE]",
+                    {
+                        "tag": tag,
+                        "type": element_type,
+                        "role": role,
+                        "label": element.get("label"),
+                        "text": element.get("text"),
+                        "score": score
+                    }
+                )
+
+            elif require_input:
+
+                print(
+                    "[INPUT CANDIDATE]",
+                    {
+                        "tag": tag,
+                        "type": element_type,
+                        "label": element.get("label"),
+                        "text": element.get("text"),
+                        "score": score
+                    }
+                )
+
+
+    # ========================================================
+    # NO MATCH
+    # ========================================================
+
+    if not candidates:
+
+        print(
+            "[FIND ELEMENT] "
+            f"No candidate found for target='{target}' "
+            f"require_input={require_input} "
+            f"require_button={require_button}"
+        )
+
+        return None
+
+
+    # ========================================================
+    # SORT BY SCORE
+    # ========================================================
+
+    candidates.sort(
+        key=lambda item: item[0],
+        reverse=True
+    )
+
+
+    # ========================================================
+    # BEST MATCH
+    # ========================================================
+
+    best_score, best_element = candidates[0]
+
+
+    print(
+        "[FIND ELEMENT] Best match:",
+        {
+            "target": target,
+            "score": best_score,
+            "tag": best_element.get("tag"),
+            "type": best_element.get("type"),
+            "role": best_element.get("role"),
+            "label": best_element.get("label"),
+            "text": best_element.get("text"),
+            "x": best_element.get("x"),
+            "y": best_element.get("y")
+        }
+    )
+
+
+    return best_element
+
+
+
+
 # ============================================================
-# FAST DOM PLANNER
+# FAST ACTION PLANNER
 # ============================================================
 
 def fast_plan(
@@ -570,7 +1122,96 @@ def fast_plan(
 
     start = time.perf_counter()
 
-    if not dom_elements:
+    print()
+    print("==========================================")
+    print("[ACTION PLANNER]")
+    print("==========================================")
+    print("Mode                 : fast")
+    print(
+        f"Safe DOM elements    : {len(dom_elements)}"
+    )
+    print(
+        f"Local PII detections : {len(detections)}"
+    )
+    print(
+        f"Task                 : {task}"
+    )
+
+    t = task_lower(task)
+
+    # --------------------------------------------------------
+    # TYPE
+    # --------------------------------------------------------
+
+    if is_type_task(task):
+
+        value = extract_explicit_type_value(task)
+        target = extract_requested_target(task)
+
+        element = find_best_element(
+            dom_elements,
+            target,
+            detections,
+            require_input=True
+        )
+
+        if element and value is not None:
+
+            x, y = element_center(element)
+
+            latency = (
+                time.perf_counter() - start
+            ) * 1000
+
+            print(
+                "[FAST PLANNER] "
+                f"type target={target or 'input'} "
+                f"value_length={len(value)} "
+                f"latency={latency:.2f} ms"
+            )
+
+            result = {
+                "action": "type",
+                "x": x,
+                "y": y,
+                "text": value,
+                "amount": 0,
+                "confidence": 0.98,
+                "reason":
+                    f"Matched '{target}' from safe DOM metadata "
+                    "and used only the value explicitly supplied "
+                    "in the user task.",
+                "vlm_latency_ms": round(
+                    latency,
+                    2
+                )
+            }
+
+            print(
+                f"[FAST] Action: type"
+            )
+            print(
+                f"[FAST] Target: ({x}, {y})"
+            )
+            print(
+                f"[FAST] Confidence: 0.98"
+            )
+            print(
+                f"[FAST] Latency: {latency:.2f} ms"
+            )
+
+            return result
+
+        # Explicit type request but no safe field/value.
+        latency = (
+            time.perf_counter() - start
+        ) * 1000
+
+        print(
+            "[FAST PLANNER] "
+            "type task could not be safely resolved"
+        )
+
         return {
             "action": "none",
             "x": 0,
@@ -578,60 +1219,45 @@ def fast_plan(
             "text": "",
             "amount": 0,
             "confidence": 0.0,
-            "reason": "No safe DOM elements were available."
+            "reason":
+                "Type task could not be matched to a safe non-sensitive input "
+                "using the explicit task value.",
+            "vlm_latency_ms": round(
+                latency,
+                2
+            )
         }
 
     # --------------------------------------------------------
-    # Scroll request
+    # SCROLL
     # --------------------------------------------------------
 
-    if task_contains(
-        task,
-        [
-            "scroll down",
-            "scroll downward",
-            "scroll lower"
-        ]
+    if (
+        "scroll down" in t or
+        "scroll downward" in t
     ):
-
-        amount = 600
-
-        match = re.search(
-            r"(\d+)\s*(?:px|pixels)?",
-            task.lower()
-        )
-
-        if match:
-            amount = int(
-                match.group(1)
-            )
 
         latency = (
             time.perf_counter() - start
         ) * 1000
-
-        print(
-            f"[FAST PLANNER] "
-            f"scroll amount={amount} "
-            f"latency={latency:.2f} ms"
-        )
 
         return {
             "action": "scroll",
             "x": 0,
             "y": 0,
             "text": "",
-            "amount": amount,
-            "confidence": 0.98,
-            "reason": "Task explicitly requested a downward scroll."
+            "amount": 600,
+            "confidence": 0.99,
+            "reason": "Explicit scroll-down task.",
+            "vlm_latency_ms": round(
+                latency,
+                2
+            )
         }
 
-    if task_contains(
-        task,
-        [
-            "scroll up",
-            "scroll upward"
-        ]
+    if (
+        "scroll up" in t or
+        "scroll upward" in t
     ):
 
         latency = (
@@ -644,163 +1270,108 @@ def fast_plan(
             "y": 0,
             "text": "",
             "amount": -600,
-            "confidence": 0.98,
-            "reason": "Task explicitly requested an upward scroll."
+            "confidence": 0.99,
+            "reason": "Explicit scroll-up task.",
+            "vlm_latency_ms": round(
+                latency,
+                2
+            )
         }
 
     # --------------------------------------------------------
-    # Score every safe DOM element
+    # CLICK
     # --------------------------------------------------------
 
-    scored = []
+    target = extract_requested_target(task)
 
-    for index, element in enumerate(
-        dom_elements
+    if (
+        "submit" in t and
+        not target
+    ):
+        target = "submit"
+
+    if (
+        ("click" in t or
+         "press" in t or
+         "select" in t) and
+        target
     ):
 
-        score = score_element(
-            element,
-            task
-        )
-
-        if score > -500:
-
-            scored.append(
-                (
-                    score,
-                    index,
-                    element
-                )
+        element = find_best_element(
+            dom_elements,
+            target,
+            detections,
+            require_button=(
+                target == "submit"
             )
-
-    scored.sort(
-        key=lambda item: item[0],
-        reverse=True
-    )
-
-    if not scored:
-
-        return {
-            "action": "none",
-            "x": 0,
-            "y": 0,
-            "text": "",
-            "amount": 0,
-            "confidence": 0.0,
-            "reason": "No suitable safe DOM element matched the task."
-        }
-
-    best_score, best_index, best_element = scored[0]
-
-    x, y = get_element_center(
-        best_element
-    )
-
-    readable_name = (
-        best_element.get("text")
-        or best_element.get("ariaLabel")
-        or best_element.get("placeholder")
-        or best_element.get("name")
-        or best_element.get("id")
-        or best_element.get("tagName")
-        or "target element"
-    )
-
-    # --------------------------------------------------------
-    # Determine action
-    # --------------------------------------------------------
-
-    is_typing = task_contains(
-        task,
-        [
-            "type",
-            "enter",
-            "fill",
-            "write"
-        ]
-    )
-
-    is_clicking = task_contains(
-        task,
-        [
-            "click",
-            "press",
-            "tap",
-            "select",
-            "open"
-        ]
-    )
-
-    is_submitting = task_contains(
-        task,
-        [
-            "submit",
-            "send",
-            "continue",
-            "next"
-        ]
-    )
-
-    # --------------------------------------------------------
-    # Type action
-    # --------------------------------------------------------
-
-    if is_typing and is_input(best_element):
-
-        typed_text = extract_quoted_text(
-            task
         )
 
-        if typed_text:
+        if element:
+
+            x, y = element_center(element)
+
+            score = score_element_for_target(
+                element,
+                target
+            )
 
             latency = (
                 time.perf_counter() - start
             ) * 1000
 
+            confidence = min(
+                0.98,
+                max(
+                    0.70,
+                    0.60 + score / 100.0
+                )
+            )
+
             print(
                 f"[FAST PLANNER] "
-                f"type target={readable_name} "
+                f"click target={target} "
+                f"score={score:.1f} "
                 f"latency={latency:.2f} ms"
             )
 
+            print(
+                "[FAST] Action: click"
+            )
+            print(
+                f"[FAST] Target: ({x}, {y})"
+            )
+            print(
+                f"[FAST] Confidence: {confidence:.2f}"
+            )
+            print(
+                f"[FAST] Latency: {latency:.2f} ms"
+            )
+
             return {
-                "action": "type",
-                "x": round(x),
-                "y": round(y),
-                "text": typed_text,
+                "action": "click",
+                "x": x,
+                "y": y,
+                "text": "",
                 "amount": 0,
-                "confidence": 0.96,
-                "reason": (
-                    f"Matched '{readable_name}' "
-                    f"from safe DOM metadata."
+                "confidence": round(
+                    confidence,
+                    2
+                ),
+                "reason":
+                    f"Matched '{target}' from safe DOM metadata.",
+                "vlm_latency_ms": round(
+                    latency,
+                    2
                 )
             }
 
-        # No explicit value -> click input instead.
-        latency = (
-            time.perf_counter() - start
-        ) * 1000
-
-        return {
-            "action": "click",
-            "x": round(x),
-            "y": round(y),
-            "text": "",
-            "amount": 0,
-            "confidence": 0.90,
-            "reason": (
-                f"Matched '{readable_name}' "
-                f"as the requested input field. "
-                f"No explicit typing value was provided."
-            )
-        }
-
     # --------------------------------------------------------
-    # Submit action
+    # WAIT
     # --------------------------------------------------------
 
-    if is_submitting and is_button(
-        best_element
+    if (
+        "wait" in t or
+        "pause" in t
     ):
 
         latency = (
@@ -808,146 +1379,106 @@ def fast_plan(
         ) * 1000
 
         return {
-            "action": "click",
-            "x": round(x),
-            "y": round(y),
+            "action": "wait",
+            "x": 0,
+            "y": 0,
             "text": "",
-            "amount": 0,
-            "confidence": 0.97,
-            "reason": (
-                f"Matched '{readable_name}' "
-                f"as the requested action button."
-            )
-        }
-
-    # --------------------------------------------------------
-    # Normal click
-    # --------------------------------------------------------
-
-    if is_clicking:
-
-        latency = (
-            time.perf_counter() - start
-        ) * 1000
-
-        print(
-            f"[FAST PLANNER] "
-            f"click target={readable_name} "
-            f"score={best_score:.1f} "
-            f"latency={latency:.2f} ms"
-        )
-
-        confidence = min(
-            0.98,
-            max(
-                0.55,
-                0.55 + best_score / 100
-            )
-        )
-
-        return {
-            "action": "click",
-            "x": round(x),
-            "y": round(y),
-            "text": "",
-            "amount": 0,
-            "confidence": round(
-                confidence,
+            "amount": 1000,
+            "confidence": 0.99,
+            "reason": "Explicit wait task.",
+            "vlm_latency_ms": round(
+                latency,
                 2
-            ),
-            "reason": (
-                f"Matched '{readable_name}' "
-                f"from safe DOM metadata."
             )
         }
 
     # --------------------------------------------------------
-    # Generic task fallback
+    # FALLBACK
     # --------------------------------------------------------
 
     latency = (
         time.perf_counter() - start
     ) * 1000
 
+    print(
+        "[FAST PLANNER] No safe action matched."
+    )
+
     return {
-        "action": "click",
-        "x": round(x),
-        "y": round(y),
+        "action": "none",
+        "x": 0,
+        "y": 0,
         "text": "",
         "amount": 0,
-        "confidence": 0.60,
-        "reason": (
-            f"Selected '{readable_name}' "
-            f"as the safest available target."
+        "confidence": 0.0,
+        "reason":
+            "No safe action could be resolved from the task "
+            "and safe DOM metadata.",
+        "vlm_latency_ms": round(
+            latency,
+            2
         )
     }
 
 
 # ============================================================
-# JSON EXTRACTION
+# JSON HELPERS FOR QWEN
 # ============================================================
 
 def extract_json(text: str) -> Dict[str, Any]:
 
-    if not text:
-        raise ValueError(
-            "VLM returned an empty response."
-        )
-
     text = text.strip()
 
-    # Direct JSON
     try:
         return json.loads(text)
     except Exception:
         pass
 
-    # Markdown JSON block
-    fenced = re.search(
-        r"```(?:json)?\s*(\{.*?\})\s*```",
-        text,
-        re.DOTALL
-    )
+    if "```" in text:
 
-    if fenced:
-        try:
-            return json.loads(
-                fenced.group(1)
-            )
-        except Exception:
-            pass
+        parts = text.split("```")
 
-    # First JSON object
+        for part in parts:
+
+            cleaned = part.strip()
+
+            if cleaned.startswith("json"):
+                cleaned = cleaned[4:].strip()
+
+            try:
+                return json.loads(cleaned)
+            except Exception:
+                continue
+
     start = text.find("{")
     end = text.rfind("}")
 
-    if start >= 0 and end > start:
+    if start != -1 and end != -1:
 
         candidate = text[
             start:end + 1
         ]
 
         try:
-            return json.loads(
-                candidate
-            )
+            return json.loads(candidate)
         except Exception:
             pass
 
     raise ValueError(
-        f"Could not parse JSON from VLM response: {text[:500]}"
+        "Could not parse JSON from VLM response: "
+        f"{text[:500]}"
     )
 
 
-# ============================================================
-# ACTION NORMALIZATION
-# ============================================================
-
 def normalize_action(
-    action: Dict[str, Any]
+    data: Dict[str, Any]
 ) -> Dict[str, Any]:
 
-    allowed = {
+    action = str(
+        data.get("action", "none")
+    ).lower().strip()
+
+    allowed_actions = {
         "click",
         "type",
         "scroll",
@@ -955,87 +1486,60 @@ def normalize_action(
         "none"
     }
 
-    action_name = str(
-        action.get("action", "none")
-    ).lower().strip()
-
-    if action_name not in allowed:
-        action_name = "none"
+    if action not in allowed_actions:
+        action = "none"
 
     try:
-        x = round(
-            float(
-                action.get("x", 0)
-            )
+        x = int(
+            data.get("x", 0) or 0
         )
     except Exception:
         x = 0
 
     try:
-        y = round(
-            float(
-                action.get("y", 0)
-            )
+        y = int(
+            data.get("y", 0) or 0
         )
     except Exception:
         y = 0
 
     try:
-        amount = round(
-            float(
-                action.get("amount", 0)
-            )
+        amount = int(
+            data.get("amount", 0) or 0
         )
     except Exception:
         amount = 0
 
     try:
         confidence = float(
-            action.get(
+            data.get(
                 "confidence",
-                0
-            )
+                0.0
+            ) or 0.0
         )
     except Exception:
-        confidence = 0
-
-    confidence = max(
-        0.0,
-        min(
-            1.0,
-            confidence
-        )
-    )
-
-    text = action.get(
-        "text",
-        ""
-    )
-
-    if text is None:
-        text = ""
+        confidence = 0.0
 
     return {
-        "action": action_name,
+        "action": action,
         "x": x,
         "y": y,
-        "text": str(text),
-        "amount": amount,
-        "confidence": round(
-            confidence,
-            2
+        "text": str(
+            data.get("text", "") or ""
         ),
+        "amount": amount,
+        "confidence": confidence,
         "reason": str(
-            action.get(
+            data.get(
                 "reason",
-                ""
+                "No reason provided"
             )
         )
     }
 
 
 # ============================================================
-# QWEN LOCAL VISION
+# QWEN VISION PATH
 # ============================================================
 
 def qwen_plan(
@@ -1048,118 +1552,95 @@ def qwen_plan(
 
     start_time = time.perf_counter()
 
-    optimized_image = optimize_image(
-        screenshot_data_url
+    encoded_image = screenshot_data_url
+
+    if "," in encoded_image:
+
+        _, encoded_image = (
+            encoded_image.split(",", 1)
+        )
+
+    print()
+    print("==========================================")
+    print("[VLM REQUEST]")
+    print("==========================================")
+
+    print(
+        f"[VLM] Sanitized image size: "
+        f"{len(encoded_image) / 1024:.1f} KB"
     )
 
-    # Keep DOM context compact.
-    safe_dom = []
+    optimized_image = optimize_image(
+        encoded_image
+    )
+
+    compact_dom = []
 
     for element in dom_elements[:20]:
 
-        safe_dom.append({
-            "tag": element.get(
-                "tag",
-                element.get(
-                    "tagName",
-                    ""
-                )
-            ),
-            "text": element.get(
-                "text",
-                ""
-            ),
-            "ariaLabel": element.get(
-                "ariaLabel",
-                ""
-            ),
-            "placeholder": element.get(
-                "placeholder",
-                ""
-            ),
-            "type": element.get(
-                "type",
-                ""
-            ),
-            "x": element.get(
-                "x",
-                element.get(
-                    "left",
-                    0
-                )
-            ),
-            "y": element.get(
-                "y",
-                element.get(
-                    "top",
-                    0
-                )
-            ),
-            "width": element.get(
-                "width",
-                0
-            ),
-            "height": element.get(
-                "height",
-                0
-            )
+        compact_dom.append({
+
+            "tag": element.get("tag"),
+            "type": element.get("type"),
+            "label": element.get("label"),
+            "text": element.get("text"),
+            "aria": element.get("aria"),
+            "placeholder":
+                element.get("placeholder"),
+            "x": element.get("x"),
+            "y": element.get("y"),
+            "width": element.get("width"),
+            "height": element.get("height")
         })
 
-    safe_detections = []
+    compact_detections = []
 
     for detection in detections[:20]:
 
-        safe_detections.append({
-            "type": detection.get(
-                "type",
-                ""
-            ),
-            "x": detection.get(
-                "x",
-                0
-            ),
-            "y": detection.get(
-                "y",
-                0
-            ),
-            "width": detection.get(
-                "width",
-                0
-            ),
-            "height": detection.get(
-                "height",
-                0
-            )
+        compact_detections.append({
+
+            "type": detection.get("type"),
+            "x": detection.get("x"),
+            "y": detection.get("y"),
+            "width": detection.get("width"),
+            "height": detection.get("height")
         })
 
     user_prompt = f"""
-TASK:
+Task:
 {task}
 
-PAGE:
+Page:
 {page_url}
 
-SAFE DOM ELEMENTS:
-{json.dumps(safe_dom, separators=(",", ":"))}
+Safe DOM elements:
+{json.dumps(
+    compact_dom,
+    separators=(",", ":")
+)}
 
-LOCAL PRIVACY DETECTIONS:
-{json.dumps(safe_detections, separators=(",", ":"))}
+Local privacy detections:
+{json.dumps(
+    compact_detections,
+    separators=(",", ":")
+)}
 
 Choose the safest useful browser action.
-
-Remember:
-- Sensitive regions are already sanitized.
-- Never reconstruct redacted information.
-- Return JSON only.
+For a type task, use ONLY the explicitly quoted value from the Task.
+Return ONLY JSON.
 """
 
     payload = {
+
         "model": MODEL,
+
         "messages": [
+
             {
                 "role": "system",
                 "content": SYSTEM_PROMPT
             },
+
             {
                 "role": "user",
                 "content": user_prompt,
@@ -1168,24 +1649,21 @@ Remember:
                 ]
             }
         ],
+
         "stream": False,
-        "keep_alive": "5m",
+
+        "keep_alive": "10m",
+
         "options": {
             "temperature": 0,
-            "num_ctx": NUM_CTX,
-            "num_predict": NUM_PREDICT
+            "num_ctx": 1024,
+            "num_predict": 48
         }
     }
 
-    print()
-    print("==========================================")
-    print("[QWEN VISION REQUEST]")
-    print("==========================================")
     print(
-        f"[VLM] Model: {MODEL}"
-    )
-    print(
-        "[VLM] Sending SANITIZED image to Ollama..."
+        "[VLM] Sending optimized image "
+        "to Ollama..."
     )
 
     try:
@@ -1196,7 +1674,7 @@ Remember:
             timeout=OLLAMA_TIMEOUT
         )
 
-    except requests.Timeout:
+    except requests.exceptions.Timeout:
 
         elapsed = (
             time.perf_counter()
@@ -1208,7 +1686,14 @@ Remember:
             f"after {elapsed / 1000:.1f} seconds."
         )
 
-    except requests.RequestException as exc:
+    except requests.exceptions.ConnectionError as exc:
+
+        raise RuntimeError(
+            "Cannot connect to Ollama at "
+            "http://127.0.0.1:11434"
+        ) from exc
+
+    except Exception as exc:
 
         raise RuntimeError(
             f"Ollama request failed: {exc}"
@@ -1223,187 +1708,112 @@ Remember:
         )
 
     try:
-        response_json = response.json()
-    except Exception:
+
+        ollama_data = response.json()
+
+    except Exception as exc:
 
         raise RuntimeError(
-            "Ollama returned invalid JSON."
+            f"Invalid JSON returned by Ollama: {exc}"
         )
 
     content = (
-        response_json
+        ollama_data
         .get("message", {})
         .get("content", "")
     )
 
+    if not content:
+
+        raise RuntimeError(
+            "Ollama returned no model content."
+        )
+
     print()
     print("==========================================")
-    print("[QWEN RAW RESPONSE]")
+    print("[VLM RAW RESPONSE]")
     print("==========================================")
     print(content)
 
-    parsed = extract_json(
-        content
-    )
+    parsed = extract_json(content)
 
     action = normalize_action(
         parsed
     )
 
-    latency = (
+    elapsed = (
         time.perf_counter()
         - start_time
     ) * 1000
 
     print(
-        f"[QWEN] Action: "
-        f"{action['action']}"
+        f"[VLM] Action: {action['action']}"
     )
-
     print(
-        f"[QWEN] Confidence: "
+        f"[VLM] Confidence: "
         f"{action['confidence']:.2f}"
     )
-
     print(
-        f"[QWEN] Total latency: "
-        f"{latency:.2f} ms"
+        f"[VLM] Total latency: "
+        f"{elapsed:.0f} ms"
     )
 
     return {
         **action,
         "vlm_latency_ms": round(
-            latency,
+            elapsed,
             2
-        ),
-        "provider": "ollama",
-        "mode": "qwen"
+        )
     }
 
 
 # ============================================================
-# MAIN ENTRY POINT
+# PUBLIC ENTRY POINT
 # ============================================================
 
 def analyze_screenshot(
-    screenshot_data_url: Optional[str] = None,
-    detections: Optional[List[Dict[str, Any]]] = None,
-    page_url: str = "",
-    dom_elements: Optional[List[Dict[str, Any]]] = None,
-    task: str = (
-        "Analyze the page and choose "
-        "the safest useful action."
-    )
+    screenshot_data_url: str,
+    detections: list,
+    page_url: str,
+    dom_elements: list,
+    task: str
 ) -> Dict[str, Any]:
 
-    start_time = time.perf_counter()
+    if not screenshot_data_url:
+        raise ValueError(
+            "No sanitized screenshot received."
+        )
 
-    detections = detections or []
-    dom_elements = dom_elements or []
+    task = normalize_text(
+        task
+    ) or "Choose the safest useful action."
 
-    print()
-    print("==========================================")
-    print("[ACTION PLANNER]")
-    print("==========================================")
-    print(
-        f"Mode                 : {VLM_MODE}"
-    )
-    print(
-        f"Safe DOM elements    : {len(dom_elements)}"
-    )
-    print(
-        f"Local PII detections : {len(detections)}"
-    )
-    print(
-        f"Task                 : {task}"
-    )
-
-    # ========================================================
-    # FAST MODE
-    # ========================================================
-
+    # Fast mode is used for the live demo.
     if VLM_MODE == "fast":
 
-        action = fast_plan(
+        return fast_plan(
             task=task,
-            dom_elements=dom_elements,
-            detections=detections
+            dom_elements=dom_elements or [],
+            detections=detections or []
         )
 
-        total_latency = (
-            time.perf_counter()
-            - start_time
-        ) * 1000
-
-        action["vlm_latency_ms"] = round(
-            total_latency,
-            2
-        )
-
-        action["provider"] = "local"
-        action["mode"] = "fast"
-
-        print(
-            f"[FAST] Action: "
-            f"{action['action']}"
-        )
-
-        print(
-            f"[FAST] Target: "
-            f"({action['x']}, {action['y']})"
-        )
-
-        print(
-            f"[FAST] Confidence: "
-            f"{action['confidence']:.2f}"
-        )
-
-        print(
-            f"[FAST] Latency: "
-            f"{total_latency:.2f} ms"
-        )
-
-        print("==========================================")
-
-        return action
-
-    # ========================================================
-    # QWEN MODE
-    # ========================================================
-
-    if VLM_MODE == "qwen":
-
-        if not screenshot_data_url:
-
-            return {
-                "action": "none",
-                "x": 0,
-                "y": 0,
-                "text": "",
-                "amount": 0,
-                "confidence": 0,
-                "reason": (
-                    "No sanitized screenshot "
-                    "was provided."
-                ),
-                "vlm_latency_ms": 0,
-                "provider": "ollama",
-                "mode": "qwen"
-            }
+    # Qwen mode remains available for visual benchmarking.
+    if VLM_MODE in (
+        "qwen",
+        "ollama",
+        "vision"
+    ):
 
         return qwen_plan(
-            screenshot_data_url=screenshot_data_url,
-            detections=detections,
-            page_url=page_url,
-            dom_elements=dom_elements,
+            screenshot_data_url=
+                screenshot_data_url,
+            detections=detections or [],
+            page_url=page_url or "",
+            dom_elements=dom_elements or [],
             task=task
         )
 
-    # ========================================================
-    # UNKNOWN MODE
-    # ========================================================
-
     raise ValueError(
-        f"Unsupported VLM_MODE='{VLM_MODE}'. "
+        f"Unsupported VLM_MODE: {VLM_MODE}. "
         "Use 'fast' or 'qwen'."
     )

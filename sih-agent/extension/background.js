@@ -3,7 +3,9 @@
 // background.js
 // ============================================================
 
-console.log("🔵 SIH Privacy Agent background service started");
+console.log(
+    "🔵 SIH Privacy Agent background service started"
+);
 
 
 // ============================================================
@@ -155,13 +157,14 @@ async function captureAndSanitize() {
 
 
     // ========================================================
-    // SEND RAW SCREENSHOT TO CONTENT SCRIPT
+    // LOCAL SANITIZATION
     //
     // IMPORTANT:
     //
-    // This screenshot is NEVER sent to FastAPI.
+    // The raw screenshot is used ONLY inside the extension
+    // for local sanitization.
     //
-    // The content script performs local pixel redaction.
+    // The raw screenshot is NEVER sent to FastAPI.
     // ========================================================
 
     let sanitizeResponse;
@@ -231,7 +234,8 @@ async function captureAndSanitize() {
 
     return {
 
-        success: true,
+        success:
+            true,
 
         sanitizedImage:
             sanitizeResponse.sanitizedImage,
@@ -262,6 +266,395 @@ async function captureAndSanitize() {
 
 
 // ============================================================
+// NORMALIZE AI ACTION
+// ============================================================
+//
+// The FAST planner returns:
+//
+// {
+//     "action": "click",
+//     "x": 604,
+//     "y": 310,
+//     "text": "",
+//     "amount": 0,
+//     "confidence": 0.98,
+//     "reason": "Matched Full Name..."
+// }
+//
+// The content.js executor expects:
+//
+// {
+//     "type": "click",
+//     "target": {
+//         "x": 604,
+//         "y": 310
+//     }
+// }
+//
+// This function converts the new format into the format
+// expected by content.js.
+//
+// ============================================================
+
+function normalizeBrowserAction(
+    action
+) {
+
+    // ========================================================
+    // INVALID ACTION
+    // ========================================================
+
+    if (
+        !action ||
+        typeof action !== "object"
+    ) {
+
+        console.warn(
+            "⚠️ Invalid AI action received:",
+            action
+        );
+
+
+        return {
+
+            type:
+                "none",
+
+            error:
+                "No valid AI action was received."
+        };
+    }
+
+
+    // ========================================================
+    // ALREADY NORMALIZED
+    // ========================================================
+    //
+    // If content.js format is already being used, don't
+    // modify it.
+    //
+    // Example:
+    //
+    // {
+    //     type: "click",
+    //     target: {
+    //         x: 604,
+    //         y: 310
+    //     }
+    // }
+    //
+    // ========================================================
+
+    if (
+        action.type
+    ) {
+
+        console.log(
+            "ℹ️ Action already uses content-script format."
+        );
+
+
+        return action;
+    }
+
+
+    // ========================================================
+    // READ NEW ACTION FORMAT
+    // ========================================================
+
+    const actionName =
+        String(
+            action.action || ""
+        )
+        .toLowerCase()
+        .trim();
+
+
+    console.log(
+        "🔍 AI action name:",
+        actionName
+    );
+
+
+    // ========================================================
+    // CLICK
+    // ========================================================
+
+    if (
+        actionName ===
+        "click"
+    ) {
+
+        const x =
+            Number(
+                action.x
+            );
+
+
+        const y =
+            Number(
+                action.y
+            );
+
+
+        if (
+            !Number.isFinite(x) ||
+            !Number.isFinite(y)
+        ) {
+
+            return {
+
+                type:
+                    "none",
+
+                error:
+                    "AI returned invalid click coordinates."
+            };
+        }
+
+
+        return {
+
+            type:
+                "click",
+
+            target: {
+
+                x:
+                    x,
+
+                y:
+                    y
+            },
+
+            confidence:
+                action.confidence ??
+                0,
+
+            reason:
+                action.reason ||
+                ""
+        };
+    }
+
+
+    // ========================================================
+    // TYPE
+    // ========================================================
+
+    if (
+        actionName ===
+        "type"
+    ) {
+
+        const x =
+            Number(
+                action.x
+            );
+
+
+        const y =
+            Number(
+                action.y
+            );
+
+
+        const value =
+            action.text ??
+            action.value ??
+            "";
+
+
+        if (
+            !Number.isFinite(x) ||
+            !Number.isFinite(y)
+        ) {
+
+            return {
+
+                type:
+                    "none",
+
+                error:
+                    "AI returned invalid type coordinates."
+            };
+        }
+
+
+        return {
+
+            type:
+                "type",
+
+            target: {
+
+                x:
+                    x,
+
+                y:
+                    y
+            },
+
+            value:
+                String(
+                    value
+                ),
+
+            confidence:
+                action.confidence ??
+                0,
+
+            reason:
+                action.reason ||
+                ""
+        };
+    }
+
+
+    // ========================================================
+    // SCROLL
+    // ========================================================
+
+    if (
+        actionName ===
+        "scroll"
+    ) {
+
+        let amount =
+            Number(
+                action.amount ??
+                action.value ??
+                500
+            );
+
+
+        if (
+            !Number.isFinite(
+                amount
+            )
+        ) {
+
+            amount =
+                500;
+        }
+
+
+        return {
+
+            type:
+                "scroll",
+
+            value:
+                amount,
+
+            confidence:
+                action.confidence ??
+                0,
+
+            reason:
+                action.reason ||
+                ""
+        };
+    }
+
+
+    // ========================================================
+    // WAIT
+    // ========================================================
+
+    if (
+        actionName ===
+        "wait"
+    ) {
+
+        let milliseconds =
+            Number(
+                action.amount ??
+                action.value ??
+                1000
+            );
+
+
+        if (
+            !Number.isFinite(
+                milliseconds
+            )
+        ) {
+
+            milliseconds =
+                1000;
+        }
+
+
+        return {
+
+            type:
+                "wait",
+
+            value:
+                milliseconds,
+
+            confidence:
+                action.confidence ??
+                0,
+
+            reason:
+                action.reason ||
+                ""
+        };
+    }
+
+
+    // ========================================================
+    // NONE
+    // ========================================================
+
+    if (
+        actionName ===
+        "none"
+    ) {
+
+        return {
+
+            type:
+                "none",
+
+            confidence:
+                action.confidence ??
+                0,
+
+            reason:
+                action.reason ||
+                ""
+        };
+    }
+
+
+    // ========================================================
+    // UNKNOWN ACTION
+    // ========================================================
+
+    console.error(
+        "❌ Unsupported AI action:",
+        action
+    );
+
+
+    return {
+
+        type:
+            "none",
+
+        error:
+            `Unsupported AI action: ${
+                actionName ||
+                "missing"
+            }`
+    };
+}
+
+
+// ============================================================
 // EXECUTE BROWSER ACTION
 // ============================================================
 
@@ -270,10 +663,30 @@ async function executeBrowserAction(
 ) {
 
     console.log(
-        "🤖 Executing browser action:",
+        "🤖 AI action received:",
         action
     );
 
+
+    // ========================================================
+    // NORMALIZE ACTION
+    // ========================================================
+
+    const normalizedAction =
+        normalizeBrowserAction(
+            action
+        );
+
+
+    console.log(
+        "🔄 Normalized browser action:",
+        normalizedAction
+    );
+
+
+    // ========================================================
+    // GET ACTIVE TAB
+    // ========================================================
 
     const tabs =
         await chrome.tabs.query({
@@ -305,10 +718,40 @@ async function executeBrowserAction(
     }
 
 
+    // ========================================================
+    // UNKNOWN ACTION SAFETY CHECK
+    // ========================================================
+
+    if (
+        normalizedAction.type ===
+            "none" &&
+        normalizedAction.error
+    ) {
+
+        return {
+
+            success:
+                false,
+
+            error:
+                normalizedAction.error
+        };
+    }
+
+
+    // ========================================================
+    // SEND ACTION TO CONTENT SCRIPT
+    // ========================================================
+
     let response;
 
 
     try {
+
+        console.log(
+            "📤 Sending normalized action to content script..."
+        );
+
 
         response =
             await chrome.tabs.sendMessage(
@@ -317,7 +760,8 @@ async function executeBrowserAction(
                     type:
                         "EXECUTE_ACTION",
 
-                    action
+                    action:
+                        normalizedAction
                 }
             );
 
@@ -336,8 +780,12 @@ async function executeBrowserAction(
     }
 
 
+    // ========================================================
+    // LOG CONTENT SCRIPT RESULT
+    // ========================================================
+
     console.log(
-        "✅ Browser action result:",
+        "✅ Content script action result:",
         response
     );
 
@@ -399,7 +847,8 @@ chrome.runtime.onMessage.addListener(
 
                         sendResponse({
 
-                            success: false,
+                            success:
+                                false,
 
                             error:
                                 error.message
@@ -407,6 +856,9 @@ chrome.runtime.onMessage.addListener(
                     }
                 );
 
+
+            // Keep the message channel open for
+            // the asynchronous response.
 
             return true;
         }
@@ -421,6 +873,12 @@ chrome.runtime.onMessage.addListener(
             "EXECUTE_BROWSER_ACTION"
         ) {
 
+            console.log(
+                "🎯 EXECUTE_BROWSER_ACTION received:",
+                message.action
+            );
+
+
             executeBrowserAction(
                 message.action
             )
@@ -428,12 +886,19 @@ chrome.runtime.onMessage.addListener(
                 .then(
                     result => {
 
+                        console.log(
+                            "🎉 Browser action completed:",
+                            result
+                        );
+
+
                         sendResponse({
 
                             success:
                                 result?.success !== false,
 
-                            result
+                            result:
+                                result
                         });
                     }
                 )
@@ -449,7 +914,8 @@ chrome.runtime.onMessage.addListener(
 
                         sendResponse({
 
-                            success: false,
+                            success:
+                                false,
 
                             error:
                                 error.message
@@ -458,8 +924,20 @@ chrome.runtime.onMessage.addListener(
                 );
 
 
+            // Keep the message channel open.
+
             return true;
         }
+
+
+        // ====================================================
+        // UNKNOWN MESSAGE
+        // ====================================================
+
+        console.warn(
+            "⚠️ Unknown background message:",
+            message?.type
+        );
 
 
         return false;

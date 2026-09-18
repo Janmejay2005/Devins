@@ -937,22 +937,48 @@ function collectSafeDOM() {
 
             let text = "";
 
+if (
+    tag === "button" ||
+    tag === "a" ||
+    tag === "label" ||
+    role === "button" ||
+    role === "link"
+) {
+    text =
+        normalizeText(
+            element.innerText ||
+            element.textContent ||
+            ""
+        );
+}
 
-            if (
-                tag === "button" ||
-                tag === "a" ||
-                tag === "label" ||
-                role === "button" ||
-                role === "link"
-            ) {
-
-                text =
-                    normalizeText(
-                        element.innerText ||
-                        element.textContent ||
-                        ""
-                    );
-            }
+/*
+ * SAFE SUBMIT CONTROL METADATA
+ *
+ * IMPORTANT:
+ * We do NOT read input.value for normal inputs.
+ *
+ * For button-like input controls only, the HTML
+ * value attribute is UI metadata such as:
+ *
+ *     <input type="submit" value="Submit">
+ *
+ * This does not expose a user's entered form value.
+ */
+if (
+    tag === "input" &&
+    (
+        type.toLowerCase() === "submit" ||
+        type.toLowerCase() === "button" ||
+        type.toLowerCase() === "reset"
+    )
+) {
+    text =
+        normalizeText(
+            element.getAttribute("value") ||
+            ""
+        );
+}
 
 
             /*
@@ -960,10 +986,23 @@ function collectSafeDOM() {
              */
 
             let label =
-                ariaLabel ||
-                name ||
-                placeholder ||
-                "";
+    ariaLabel ||
+    name ||
+    placeholder ||
+    "";
+
+if (
+    tag === "input" &&
+    (
+        type.toLowerCase() === "submit" ||
+        type.toLowerCase() === "button" ||
+        type.toLowerCase() === "reset"
+    )
+) {
+    label =
+        text ||
+        label;
+}
 
 
             if (
@@ -1598,10 +1637,30 @@ function executeClick(
 // EXECUTE TYPE
 // ============================================================
 
+// ============================================================
+// EXECUTE TYPE
+// ============================================================
+//
+// Privacy model:
+//
+// 1. The agent receives only SAFE DOM metadata.
+// 2. The value to type comes explicitly from the user's task.
+// 3. The existing value of the field is NEVER sent to the server.
+// 4. Screenshot PII redaction still happens locally.
+// 5. Password / credential / OTP fields are ALWAYS blocked.
+// 6. Normal fields such as Full Name, Email and Phone can be
+//    edited locally when explicitly requested by the user.
+//
+// ============================================================
+
 function executeType(
     target,
     value
 ) {
+
+    // ========================================================
+    // VALIDATE TARGET
+    // ========================================================
 
     if (
         !target ||
@@ -1610,43 +1669,34 @@ function executeType(
     ) {
 
         return {
-
             success: false,
-
             error:
                 "Type target coordinates missing"
         };
     }
 
 
-    if (!value) {
+    // ========================================================
+    // VALIDATE VALUE
+    // ========================================================
+
+    if (
+        value === null ||
+        value === undefined ||
+        String(value).length === 0
+    ) {
 
         return {
-
             success: false,
-
             error:
                 "Type value is empty"
         };
     }
 
 
-    if (
-        isPointInsideDetection(
-            Number(target.x),
-            Number(target.y)
-        )
-    ) {
-
-        return {
-
-            success: false,
-
-            error:
-                "Typing blocked because target overlaps a privacy-protected region"
-        };
-    }
-
+    // ========================================================
+    // FIND ELEMENT AT TARGET
+    // ========================================================
 
     const element =
         document.elementFromPoint(
@@ -1658,14 +1708,16 @@ function executeType(
     if (!element) {
 
         return {
-
             success: false,
-
             error:
                 "No element found at type coordinates"
         };
     }
 
+
+    // ========================================================
+    // FIND EDITABLE INPUT
+    // ========================================================
 
     const input =
         element.closest(
@@ -1676,14 +1728,24 @@ function executeType(
     if (!input) {
 
         return {
-
             success: false,
-
             error:
                 "Target is not an input or textarea"
         };
     }
 
+
+    // ========================================================
+    // READ ONLY METADATA
+    // ========================================================
+    //
+    // IMPORTANT:
+    // We intentionally DO NOT read input.value.
+    //
+    // These attributes are safe metadata used only to
+    // enforce the local privacy policy.
+    //
+    // ========================================================
 
     const inputType =
         (
@@ -1693,25 +1755,197 @@ function executeType(
         ).toLowerCase();
 
 
+    const inputName =
+        (
+            input.getAttribute(
+                "name"
+            ) || ""
+        ).toLowerCase();
+
+
+    const inputId =
+        (
+            input.getAttribute(
+                "id"
+            ) || ""
+        ).toLowerCase();
+
+
+    const inputPlaceholder =
+        (
+            input.getAttribute(
+                "placeholder"
+            ) || ""
+        ).toLowerCase();
+
+
+    const autocomplete =
+        (
+            input.getAttribute(
+                "autocomplete"
+            ) || ""
+        ).toLowerCase();
+
+
+    const ariaLabel =
+        (
+            input.getAttribute(
+                "aria-label"
+            ) || ""
+        ).toLowerCase();
+
+
+    // ========================================================
+    // COMBINED SAFE METADATA
+    // ========================================================
+
+    const metadata =
+        [
+            inputName,
+            inputId,
+            inputPlaceholder,
+            autocomplete,
+            ariaLabel
+        ].join(" ");
+
+
+    // ========================================================
+    // HARD PRIVACY BLOCK
+    // ========================================================
+    //
+    // These fields must NEVER be automatically typed into.
+    //
+    // This remains true even if the user task accidentally
+    // points the agent at them.
+    //
+    // ========================================================
+
+    const isPasswordField =
+        inputType === "password";
+
+
+    const isCredentialField =
+        metadata.includes(
+            "password"
+        ) ||
+        metadata.includes(
+            "passwd"
+        ) ||
+        metadata.includes(
+            "credential"
+        ) ||
+        metadata.includes(
+            "secret"
+        );
+
+
+    const isOTPField =
+        metadata.includes(
+            "otp"
+        ) ||
+        metadata.includes(
+            "one-time-code"
+        ) ||
+        autocomplete ===
+            "one-time-code";
+
+
     if (
-        inputType === "password"
+        isPasswordField ||
+        isCredentialField ||
+        isOTPField
     ) {
 
+        console.warn(
+            "🔒 Typing blocked on protected credential field"
+        );
+
         return {
-
             success: false,
-
             error:
-                "Typing into password fields is blocked"
+                "Typing into password, credential or OTP fields is blocked"
         };
     }
 
 
+    // ========================================================
+    // DISABLED / READONLY SAFETY
+    // ========================================================
+
+    if (
+        input.disabled
+    ) {
+
+        return {
+            success: false,
+            error:
+                "Target input is disabled"
+        };
+    }
+
+
+    if (
+        input.readOnly
+    ) {
+
+        return {
+            success: false,
+            error:
+                "Target input is read-only"
+        };
+    }
+
+
+    // ========================================================
+    // LOCAL PII EDITING
+    // ========================================================
+    //
+    // IMPORTANT:
+    //
+    // A Full Name / Email / Phone field may already contain
+    // PII and therefore overlap a local privacy detection.
+    //
+    // That does NOT prevent the user from editing the field.
+    //
+    // The field's existing value remains inside the browser.
+    //
+    // We do NOT send input.value to the backend.
+    //
+    // The screenshot is still sanitized separately before
+    // being sent to the AI planner.
+    //
+    // ========================================================
+
+    console.log(
+        "🔐 Local editable field:",
+        {
+            tag: input.tagName,
+            type: inputType || "text",
+            name: inputName,
+            id: inputId,
+            placeholder: inputPlaceholder
+        }
+    );
+
+
+    // ========================================================
+    // FOCUS INPUT
+    // ========================================================
+
     input.focus();
+
+
+    // ========================================================
+    // SET VALUE
+    // ========================================================
 
     input.value =
         String(value);
 
+
+    // ========================================================
+    // TRIGGER INPUT EVENT
+    // ========================================================
 
     input.dispatchEvent(
         new Event(
@@ -1723,6 +1957,10 @@ function executeType(
     );
 
 
+    // ========================================================
+    // TRIGGER CHANGE EVENT
+    // ========================================================
+
     input.dispatchEvent(
         new Event(
             "change",
@@ -1733,20 +1971,29 @@ function executeType(
     );
 
 
+    // ========================================================
+    // FINAL RESULT
+    // ========================================================
+
+    console.log(
+        "✅ Safe local value entered"
+    );
+
+
     return {
 
         success: true,
 
-        action: "type",
+        action:
+            "type",
 
         element:
             input.tagName,
 
         message:
-            "Safe non-sensitive value entered"
+            "Safe value entered locally"
     };
 }
-
 
 // ============================================================
 // EXECUTE SCROLL
