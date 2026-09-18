@@ -17,6 +17,11 @@ const captureButton =
         "captureButton"
     );
 
+const taskInput =
+    document.getElementById(
+        "taskInput"
+    );
+
 const result =
     document.getElementById(
         "result"
@@ -40,7 +45,15 @@ const resultContent =
 if (!captureButton) {
 
     console.error(
-        "❌ Capture button not found."
+        "❌ Execute button not found."
+    );
+}
+
+
+if (!taskInput) {
+
+    console.error(
+        "❌ Task input not found."
     );
 }
 
@@ -59,14 +72,11 @@ function showResult(
         "hidden"
     );
 
-
     resultTitle.textContent =
         title;
 
-
     resultContent.innerHTML =
         content;
-
 
     resultTitle.className =
         success
@@ -90,7 +100,7 @@ function setLoading(
 
         captureButton.innerHTML =
             `<span class="loading"></span>
-             Capturing & Sanitizing...`;
+             Running Private Agent...`;
 
     } else {
 
@@ -98,19 +108,101 @@ function setLoading(
             false;
 
         captureButton.innerHTML =
-            `🛡️ Capture &amp; Sanitize Screen`;
+            `🛡️ Execute Private Agent`;
     }
 }
 
 
 // ============================================================
-// CAPTURE PIPELINE
+// QUICK TASK BUTTONS
+// ============================================================
+
+const quickTaskButtons =
+    document.querySelectorAll(
+        ".quick-task"
+    );
+
+
+quickTaskButtons.forEach(
+    button => {
+
+        button.addEventListener(
+            "click",
+            () => {
+
+                const task =
+                    button.dataset.task ||
+                    "";
+
+                taskInput.value =
+                    task;
+
+                taskInput.focus();
+
+                console.log(
+                    "📝 Quick task selected:",
+                    task
+                );
+            }
+        );
+
+    }
+);
+
+
+// ============================================================
+// MAIN AGENT PIPELINE
 // ============================================================
 
 async function captureAndAnalyze() {
 
     console.log(
-        "🚀 Capture button clicked"
+        "🚀 Private Agent started"
+    );
+
+
+    // --------------------------------------------------------
+    // TASK
+    // --------------------------------------------------------
+
+    const task =
+        taskInput.value.trim();
+
+
+    if (!task) {
+
+        showResult(
+
+            "⚠️ Task required",
+
+            `
+                <div class="row error">
+
+                    Please enter a task for
+                    the browser agent.
+
+                </div>
+
+                <div class="small">
+
+                    Example:
+                    <b>Click the Full Name field</b>
+
+                </div>
+            `,
+
+            false
+        );
+
+        taskInput.focus();
+
+        return;
+    }
+
+
+    console.log(
+        "📝 User task:",
+        task
     );
 
 
@@ -129,7 +221,7 @@ async function captureAndAnalyze() {
         // ====================================================
 
         console.log(
-            "📸 Requesting capture from background..."
+            "📸 Requesting local capture..."
         );
 
 
@@ -138,6 +230,7 @@ async function captureAndAnalyze() {
 
                 type:
                     "CAPTURE_AND_SANITIZE"
+
             });
 
 
@@ -147,9 +240,7 @@ async function captureAndAnalyze() {
         );
 
 
-        if (
-            !captureResponse
-        ) {
+        if (!captureResponse) {
 
             throw new Error(
                 "No response received from background service."
@@ -157,9 +248,7 @@ async function captureAndAnalyze() {
         }
 
 
-        if (
-            !captureResponse.success
-        ) {
+        if (!captureResponse.success) {
 
             throw new Error(
                 captureResponse.error ||
@@ -219,7 +308,7 @@ async function captureAndAnalyze() {
 
 
         // ====================================================
-        // SHOW SANITIZED IMAGE
+        // STEP 1 RESULT
         // ====================================================
 
         showResult(
@@ -227,26 +316,57 @@ async function captureAndAnalyze() {
             "🛡️ Screen sanitized locally",
 
             `
+
+                <div class="privacy-badge">
+
+                    🔒 PRIVACY PROTECTED
+
+                </div>
+
+
                 <div class="row">
+
+                    <span class="label">
+                        Task:
+                    </span>
+
+                    ${escapeHTML(task)}
+
+                </div>
+
+
+                <div class="row">
+
                     <span class="label">
                         Privacy detections:
                     </span>
+
                     ${detections.length}
+
                 </div>
 
+
                 <div class="row">
+
                     <span class="label">
                         Safe DOM elements:
                     </span>
+
                     ${domElements.length}
+
                 </div>
 
+
                 <div class="row">
+
                     <span class="label">
                         Network payload:
                     </span>
+
                     Sanitized screenshot only
+
                 </div>
+
 
                 <img
                     class="preview"
@@ -254,10 +374,14 @@ async function captureAndAnalyze() {
                     alt="Sanitized screenshot"
                 />
 
+
                 <div class="small">
-                    Raw sensitive pixels were redacted locally
-                    before server processing.
+
+                    Raw sensitive pixels were redacted
+                    locally before AI processing.
+
                 </div>
+
             `,
 
             true
@@ -269,7 +393,7 @@ async function captureAndAnalyze() {
         // ====================================================
 
         console.log(
-            "🌐 Sending sanitized data to FastAPI..."
+            "🌐 Sending sanitized context to FastAPI..."
         );
 
 
@@ -282,16 +406,22 @@ async function captureAndAnalyze() {
                 "http://127.0.0.1:8000/analyze",
                 {
 
-                    method: "POST",
+                    method:
+                        "POST",
 
                     headers: {
 
                         "Content-Type":
                             "application/json"
+
                     },
 
                     body:
                         JSON.stringify({
+
+                            // IMPORTANT:
+                            // Only sanitized screenshot
+                            // is sent to backend.
 
                             screenshot:
                                 sanitizedImage,
@@ -306,8 +436,16 @@ async function captureAndAnalyze() {
                                 domElements,
 
                             viewport:
-                                viewport
+                                viewport,
+
+                            // NEW:
+                            // Send user's actual task.
+
+                            task:
+                                task
+
                         })
+
                 }
             );
 
@@ -315,6 +453,13 @@ async function captureAndAnalyze() {
         const serverLatency =
             performance.now() -
             startTime;
+
+
+        console.log(
+            "⏱️ Server request latency:",
+            serverLatency.toFixed(2),
+            "ms"
+        );
 
 
         if (!response.ok) {
@@ -335,9 +480,7 @@ async function captureAndAnalyze() {
         );
 
 
-        if (
-            !data.success
-        ) {
+        if (!data.success) {
 
             throw new Error(
                 data.error ||
@@ -347,17 +490,23 @@ async function captureAndAnalyze() {
 
 
         // ====================================================
-        // STEP 3 — DISPLAY ACTION
+        // STEP 3 — READ ACTION
         // ====================================================
 
         const action =
             data.action ||
             {
-                type: "none"
+                action: "none"
             };
 
 
+        // IMPORTANT:
+        // Backend returns "action".
+        // Older popup expected "type".
+        // We now support both.
+
         const actionType =
+            action.action ||
             action.type ||
             "none";
 
@@ -372,8 +521,14 @@ async function captureAndAnalyze() {
             "No reason provided";
 
 
+        console.log(
+            "🎯 Action received:",
+            action
+        );
+
+
         // ====================================================
-        // NONE
+        // NONE ACTION
         // ====================================================
 
         if (
@@ -383,44 +538,75 @@ async function captureAndAnalyze() {
 
             showResult(
 
-                "✅ AI analysis completed",
+                "ℹ️ Agent completed",
 
                 `
+
                     <div class="row">
+
+                        <span class="label">
+                            Task:
+                        </span>
+
+                        ${escapeHTML(task)}
+
+                    </div>
+
+
+                    <div class="row">
+
                         <span class="label">
                             Action:
                         </span>
+
                         none
+
                     </div>
 
+
                     <div class="row">
+
                         <span class="label">
                             Confidence:
                         </span>
+
                         ${confidence}
+
                     </div>
 
+
                     <div class="row">
+
                         <span class="label">
                             Reason:
                         </span>
+
                         ${escapeHTML(reason)}
+
                     </div>
 
+
                     <div class="row">
+
                         <span class="label">
-                            Server latency:
+                            Planner latency:
                         </span>
+
                         ${Number(
-                            data.processing_time_ms || 0
+                            data.vlm_latency_ms ||
+                            data.processing_time_ms ||
+                            0
                         ).toFixed(2)} ms
+
                     </div>
+
 
                     <img
                         class="preview"
                         src="${sanitizedImage}"
                         alt="Sanitized screenshot"
                     />
+
                 `,
 
                 true
@@ -432,12 +618,12 @@ async function captureAndAnalyze() {
 
 
         // ====================================================
-        // EXECUTE ACTION
+        // STEP 4 — EXECUTE ACTION IN BROWSER
         // ====================================================
 
         console.log(
-            "🎯 Action received:",
-            action
+            "🖱️ Executing browser action:",
+            actionType
         );
 
 
@@ -447,7 +633,9 @@ async function captureAndAnalyze() {
                 type:
                     "EXECUTE_BROWSER_ACTION",
 
-                action
+                action:
+                    action
+
             });
 
 
@@ -473,7 +661,10 @@ async function captureAndAnalyze() {
 
                 <div class="row success">
 
-                    Execution:
+                    <span class="label">
+                        Execution:
+                    </span>
+
                     ✅ Successful
 
                 </div>
@@ -486,20 +677,22 @@ async function captureAndAnalyze() {
 
                 <div class="row error">
 
-                    Execution:
+                    <span class="label">
+                        Execution:
+                    </span>
+
                     ❌ Failed
 
                 </div>
 
+
                 <div class="row error">
 
-                    ${
-                        escapeHTML(
-                            executionResponse?.error ||
-                            executionResponse?.result?.error ||
-                            "Unknown execution error"
-                        )
-                    }
+                    ${escapeHTML(
+                        executionResponse?.error ||
+                        executionResponse?.result?.error ||
+                        "Unknown execution error"
+                    )}
 
                 </div>
 
@@ -508,14 +701,34 @@ async function captureAndAnalyze() {
 
 
         // ====================================================
-        // FINAL UI
+        // STEP 5 — FINAL RESULT
         // ====================================================
 
         showResult(
 
-            "✅ AI action executed",
+            executionSuccess
+                ? "✅ Private Agent Action Executed"
+                : "⚠️ Agent Action Failed",
 
             `
+
+                <div class="privacy-badge">
+
+                    🔒 SANITIZED BEFORE AI
+
+                </div>
+
+
+                <div class="row">
+
+                    <span class="label">
+                        Task:
+                    </span>
+
+                    ${escapeHTML(task)}
+
+                </div>
+
 
                 <div class="row">
 
@@ -560,12 +773,25 @@ async function captureAndAnalyze() {
                 <div class="row">
 
                     <span class="label">
-                        Server latency:
+                        Planner latency:
                     </span>
 
                     ${Number(
-                        data.processing_time_ms || 0
+                        data.vlm_latency_ms ||
+                        data.processing_time_ms ||
+                        0
                     ).toFixed(2)} ms
+
+                </div>
+
+
+                <div class="row">
+
+                    <span class="label">
+                        PII detections:
+                    </span>
+
+                    ${detections.length}
 
                 </div>
 
@@ -576,6 +802,15 @@ async function captureAndAnalyze() {
                     alt="Sanitized screenshot"
                 />
 
+
+                <div class="small">
+
+                    The screenshot shown above is the
+                    sanitized version. Sensitive pixels
+                    were removed locally before transmission.
+
+                </div>
+
             `,
 
             executionSuccess
@@ -585,16 +820,17 @@ async function captureAndAnalyze() {
     } catch (error) {
 
         console.error(
-            "❌ Pipeline error:",
+            "❌ Private Agent pipeline error:",
             error
         );
 
 
         showResult(
 
-            "❌ Pipeline error",
+            "❌ Agent Pipeline Error",
 
             `
+
                 <div class="error">
 
                     ${escapeHTML(
@@ -604,20 +840,25 @@ async function captureAndAnalyze() {
 
                 </div>
 
+
                 <div class="small">
 
-                    Open the extension's service worker
-                    console for detailed logs.
+                    Check the extension service worker
+                    console and FastAPI terminal for
+                    detailed logs.
 
                 </div>
+
             `,
 
             false
         );
 
+
     } finally {
 
         setLoading(false);
+
     }
 }
 
@@ -630,23 +871,30 @@ function escapeHTML(
     value
 ) {
 
-    return String(value ?? "")
+    return String(
+        value ?? ""
+    )
+
         .replace(
             /&/g,
             "&amp;"
         )
+
         .replace(
             /</g,
             "&lt;"
         )
+
         .replace(
             />/g,
             "&gt;"
         )
+
         .replace(
             /"/g,
             "&quot;"
         )
+
         .replace(
             /'/g,
             "&#039;"
@@ -664,6 +912,36 @@ captureButton.addEventListener(
 );
 
 
+// ============================================================
+// ENTER KEY
+// ============================================================
+
+taskInput.addEventListener(
+    "keydown",
+    event => {
+
+        if (
+            event.key === "Enter" &&
+            !event.shiftKey
+        ) {
+
+            event.preventDefault();
+
+            captureAndAnalyze();
+        }
+
+    }
+);
+
+
+// ============================================================
+// DEFAULT TASK
+// ============================================================
+
+taskInput.value =
+    "Click the Full Name field";
+
+
 console.log(
-    "✅ Capture button listener attached"
+    "✅ Private Agent popup initialized"
 );

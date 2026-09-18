@@ -5,8 +5,9 @@
 
     <meta charset="UTF-8">
 
-    <meta name="viewport"
-          content="width=device-width, initial-scale=1.0">
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0">
 
     <title>SIH Privacy Agent</title>
 
@@ -37,6 +38,10 @@
         }
 
 
+        /* =====================================================
+           HEADER
+           ===================================================== */
+
         .header {
 
             display: flex;
@@ -54,6 +59,10 @@
             border-bottom: 1px solid #dddddd;
         }
 
+
+        /* =====================================================
+           PRIVACY STATUS
+           ===================================================== */
 
         .status {
 
@@ -74,6 +83,125 @@
             font-size: 15px;
         }
 
+
+        /* =====================================================
+           TASK SECTION
+           ===================================================== */
+
+        .task-section {
+
+            margin: 0 18px 14px 18px;
+        }
+
+
+        .task-label {
+
+            display: block;
+
+            margin-bottom: 7px;
+
+            font-size: 15px;
+
+            font-weight: 700;
+        }
+
+
+        .task-input {
+
+            width: 100%;
+
+            min-height: 78px;
+
+            padding: 12px;
+
+            resize: vertical;
+
+            border: 1px solid #cbd5e1;
+
+            border-radius: 10px;
+
+            outline: none;
+
+            font-family:
+                Arial,
+                Helvetica,
+                sans-serif;
+
+            font-size: 14px;
+
+            line-height: 1.45;
+
+            color: #111111;
+
+            background: #ffffff;
+        }
+
+
+        .task-input:focus {
+
+            border-color: #223f67;
+
+            box-shadow:
+                0 0 0 2px
+                rgba(34, 63, 103, 0.10);
+        }
+
+
+        .task-help {
+
+            margin-top: 6px;
+
+            font-size: 12px;
+
+            color: #666666;
+
+            line-height: 1.4;
+        }
+
+
+        /* =====================================================
+           QUICK TASKS
+           ===================================================== */
+
+        .quick-tasks {
+
+            display: flex;
+
+            flex-wrap: wrap;
+
+            gap: 7px;
+
+            margin-top: 10px;
+        }
+
+
+        .quick-task {
+
+            padding: 7px 10px;
+
+            border: 1px solid #d1d5db;
+
+            border-radius: 8px;
+
+            background: #f8fafc;
+
+            color: #334155;
+
+            font-size: 12px;
+
+            cursor: pointer;
+        }
+
+
+        .quick-task:hover {
+
+            background: #eef2f7;
+        }
+
+
+        /* =====================================================
+           EXECUTE BUTTON
+           ===================================================== */
 
         .capture-button {
 
@@ -125,11 +253,19 @@
         }
 
 
+        /* =====================================================
+           RESULT
+           ===================================================== */
+
         .result {
 
-            margin: 0 18px 18px 18px;
+            margin:
+                0
+                18px
+                18px
+                18px;
 
-            font-size: 16px;
+            font-size: 15px;
 
             line-height: 1.5;
         }
@@ -147,7 +283,7 @@
 
         .row {
 
-            margin: 4px 0;
+            margin: 6px 0;
         }
 
 
@@ -173,7 +309,33 @@
         }
 
 
+        .privacy-badge {
+
+            display: inline-block;
+
+            margin-top: 4px;
+
+            padding: 4px 8px;
+
+            border-radius: 6px;
+
+            background: #ecfdf5;
+
+            color: #065f46;
+
+            font-size: 12px;
+
+            font-weight: 700;
+        }
+
+
+        /* =====================================================
+           IMAGE PREVIEW
+           ===================================================== */
+
         .preview {
+
+            display: block;
 
             width: 100%;
 
@@ -191,6 +353,10 @@
         }
 
 
+        /* =====================================================
+           SMALL TEXT
+           ===================================================== */
+
         .small {
 
             font-size: 12px;
@@ -198,6 +364,8 @@
             color: #666666;
 
             margin-top: 8px;
+
+            line-height: 1.4;
         }
 
 
@@ -206,6 +374,10 @@
             display: none;
         }
 
+
+        /* =====================================================
+           LOADING
+           ===================================================== */
 
         .loading {
 
@@ -221,7 +393,8 @@
 
             border-radius: 50%;
 
-            animation: spin 0.8s linear infinite;
+            animation:
+                spin 0.8s linear infinite;
 
             vertical-align: -2px;
 
@@ -238,6 +411,7 @@
             to {
                 transform: rotate(360deg);
             }
+
         }
 
     </style>
@@ -248,6 +422,10 @@
 <body>
 
 
+    <!-- =====================================================
+         HEADER
+         ===================================================== -->
+
     <div class="header">
 
         🔒 SIH Privacy Agent
@@ -255,21 +433,127 @@
     </div>
 
 
+    <!-- =====================================================
+         PRIVACY STATUS
+         ===================================================== -->
+
     <div class="status">
 
-        • Local Privacy Engine Active
+        🟢 Local Privacy Engine Active
+
+        <div class="small">
+
+            Sensitive information is detected and
+            sanitized locally before AI processing.
+
+        </div>
 
     </div>
 
+
+    <!-- =====================================================
+         TASK
+         ===================================================== -->
+
+    <div class="task-section">
+
+        <label
+            class="task-label"
+            for="taskInput">
+
+            🤖 Agent Task
+
+        </label>
+
+
+        <textarea
+            id="taskInput"
+            class="task-input"
+            placeholder="Example: Click the Full Name field"
+            spellcheck="false"></textarea>
+
+
+        <div class="task-help">
+
+            Tell the agent what browser action to perform.
+            Sensitive values are never reconstructed from
+            redacted content.
+
+        </div>
+
+
+        <div class="quick-tasks">
+
+            <button
+                type="button"
+                class="quick-task"
+                data-task="Click the Full Name field">
+
+                Full Name
+
+            </button>
+
+
+            <button
+                type="button"
+                class="quick-task"
+                data-task="Click the Email field">
+
+                Email
+
+            </button>
+
+
+            <button
+                type="button"
+                class="quick-task"
+                data-task="Click the Phone field">
+
+                Phone
+
+            </button>
+
+
+            <button
+                type="button"
+                class="quick-task"
+                data-task="Click Submit">
+
+                Submit
+
+            </button>
+
+
+            <button
+                type="button"
+                class="quick-task"
+                data-task="Scroll down">
+
+                Scroll Down
+
+            </button>
+
+        </div>
+
+    </div>
+
+
+    <!-- =====================================================
+         EXECUTE
+         ===================================================== -->
 
     <button
         id="captureButton"
         class="capture-button">
 
-        🛡️ Capture &amp; Sanitize Screen
+        🛡️ Execute Private Agent
 
     </button>
 
+
+    <!-- =====================================================
+         RESULT
+         ===================================================== -->
 
     <div
         id="result"
