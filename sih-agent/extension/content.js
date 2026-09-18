@@ -1862,9 +1862,27 @@ function executeBrowserAction(
     }
 
 
+    // Backend action schema:
+    // { action, x, y, text, amount, confidence, reason }
+    // Legacy extension schema:
+    // { type, target: { x, y }, value }
+    // Accept both so the privacy engine remains compatible.
+
     const actionType =
+        action.action ||
         action.type;
 
+    const target =
+        action.target ||
+        {
+            x: action.x,
+            y: action.y
+        };
+
+    const value =
+        action.value !== undefined
+            ? action.value
+            : action.text;
 
     if (
         actionType ===
@@ -1872,7 +1890,7 @@ function executeBrowserAction(
     ) {
 
         return executeClick(
-            action.target
+            target
         );
     }
 
@@ -1883,8 +1901,8 @@ function executeBrowserAction(
     ) {
 
         return executeType(
-            action.target,
-            action.value
+            target,
+            value
         );
     }
 
@@ -1895,7 +1913,9 @@ function executeBrowserAction(
     ) {
 
         return executeScroll(
-            action.value
+            action.amount !== undefined
+                ? action.amount
+                : value
         );
     }
 
@@ -1906,7 +1926,9 @@ function executeBrowserAction(
     ) {
 
         return executeWait(
-            action.value
+            action.amount !== undefined
+                ? action.amount
+                : value
         );
     }
 
@@ -2289,3 +2311,4 @@ if (
 
     initializePrivacyAgent();
 }
+
