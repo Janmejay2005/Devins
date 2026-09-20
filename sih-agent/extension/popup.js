@@ -105,7 +105,10 @@ const ACTION_SETTLE_DELAY_MS = 500;
 const MAX_CAPTURE_RETRIES = 5;
 
 const CAPTURE_RETRY_DELAY_MS = 500;
+// Browser-action retry configuration.
+const MAX_ACTION_RETRIES = 2;
 
+const ACTION_RETRY_DELAY_MS = 400;
 
 // ============================================================
 // AGENT STATE
@@ -118,7 +121,7 @@ let completedActions = [];
 let totalPlannerLatency = 0;
 
 let totalNetworkLatency = 0;
-
+let currentActionRetryCount = 0;
 
 // ============================================================
 // RESULT UI
@@ -1895,6 +1898,105 @@ function showProgress(
 // ============================================================
 // MAIN MULTI-STEP AGENT PIPELINE
 // ============================================================
+function isRetryableActionFailure(response) {
+
+    if (
+        !response ||
+        typeof response !== "object"
+    ) {
+        return false;
+    }
+
+    // Unsafe failures are always terminal.
+    if (
+        response.unsafe === true
+    ) {
+        return false;
+    }
+
+    return (
+        response.retryable === true
+    );
+}
+
+
+function getExecutionError(response) {
+
+    return (
+        response?.error ||
+        response?.result?.error ||
+        "Unknown browser execution error."
+    );
+}
+
+
+async function retryFailedAction(
+    analysis,
+    executionResponse,
+    retryNumber,
+    currentCaptureRef
+) {
+
+    console.warn(
+        `[RETRY] Action failed. Retrying ${retryNumber}/${MAX_ACTION_RETRIES}.`
+    );
+
+    console.warn(
+        "[RETRY] Failure reason:",
+        getExecutionError(
+            executionResponse
+        )
+    );
+
+
+    await new Promise(
+        resolve =>
+            setTimeout(
+                resolve,
+                ACTION_RETRY_DELAY_MS
+            )
+    );
+
+
+    try {
+
+        console.log(
+            "[RETRY] Capturing a fresh sanitized state before re-planning."
+        );
+
+
+        const freshCapture =
+            await captureFinalState();
+
+
+        currentCaptureRef.value =
+            freshCapture;
+
+
+        console.log(
+            "[RETRY] Fresh sanitized state captured."
+        );
+
+
+        console.log(
+            `[RETRY] Re-planning failed ${analysis.actionType} action.`
+        );
+
+
+        return true;
+
+    } catch (captureError) {
+
+        console.error(
+            "[RETRY] Fresh sanitized capture failed. Retry aborted safely:",
+            captureError?.message ||
+            captureError
+        );
+
+
+        return false;
+    }
+}
 
 async function captureAndAnalyze() {
 
@@ -1923,7 +2025,7 @@ async function captureAndAnalyze() {
 
 
     totalNetworkLatency = 0;
-
+currentActionRetryCount = 0;
 
     setLoading(true);
 
@@ -2225,56 +2327,200 @@ async function captureAndAnalyze() {
                 );
 
 
-            // =================================================
+                       // =================================================
             // EXECUTION FAILURE
             // =================================================
 
             if (!executionSuccess) {
 
+                const retryable =
+                    isRetryableActionFailure(
+                        executionResponse
+                    );
+
+                const unsafeFailure =
+                    executionResponse?.unsafe === true;
+
+                const errorMessage =
+                    getExecutionError(
+                        executionResponse
+                    );
+
                 console.error(
-    "[ACTION] Browser action failed:",
-    {
-        success: false,
-        action:
-            executionResponse?.result?.action ||
-            executionResponse?.action ||
-            "unknown",
-        error:
-            executionResponse?.error ||
-            executionResponse?.result?.error ||
-            "Unknown execution error"
-    }
-);
+                    "[ACTION] Browser action failed:",
+                    {
+                        success: false,
 
+                        action:
+                            executionResponse?.result?.action ||
+                            executionResponse?.action ||
+                            "unknown",
 
-                showExecutionFailure(
+                        retryable,
 
-                    originalTask,
+                        unsafe:
+                            unsafeFailure,
 
-                    analysis,
+                        retryCount:
+                            currentActionRetryCount,
 
-                    currentCapture.sanitizedImage,
-
-                    executionResponse
+                        error:
+                            errorMessage
+                    }
                 );
 
 
-                return;
-            }
+                // =================================================
+                // RETRY TRANSIENT FAILURE
+                // =================================================
+
+                if (
+                    retryable &&
+                    !unsafeFailure &&
+                    currentActionRetryCount <
+                        MAX_ACTION_RETRIES
+                ) {
+
+                    currentActionRetryCount += 1;
 
 
-            // =================================================
-            // RECORD SUCCESSFUL ACTION
-            // =================================================
+                    const retryState = {
+                        value:
+                            currentCapture
+                    };
 
-            completedActions.push({
-    action: analysis.actionType,
 
-    description: describeAction(
-        analysis.action
-    ),
+                    showResult(
+                        "Retrying Browser Action",
 
-    confidence: analysis.confidence,
+                        `
+                            <div class="privacy-badge">
+                                SANITIZED BEFORE RETRY
+                            </div>
+
+                            <div class="row">
+                                <span class="label">
+                                    Task:
+                                </span>
+
+                                ${escapeHTML(
+                                    originalTask
+                                )}
+                            </div>
+
+                            <div class="row">
+                                <span class="label">
+                                    Action:
+                                </span>
+
+                                ${escapeHTML(
+                                    actionLabel(
+                                        analysis.actionType
+                                    )
+                                )}
+                            </div>
+
+                            <div class="row">
+                                <span class="label">
+                                    Retry:
+                                </span>
+
+                                ${currentActionRetryCount}/${MAX_ACTION_RETRIES}
+                            </div>
+
+                            <div class="row error">
+                                ${escapeHTML(
+                                    errorMessage
+                                )}
+                            </div>
+
+                            <div class="small">
+                                A fresh sanitized page state will be captured and the action will be re-planned.
+                            </div>
+                        `,
+
+                        true
+                    );
+
+
+                    const retryPrepared =
+                        await retryFailedAction(
+                            analysis,
+                            executionResponse,
+                            currentActionRetryCount,
+                            retryState
+                        );
+
+
+                    if (
+                        retryPrepared
+                    ) {
+
+                        currentCapture =
+                            retryState.value;
+
+                        console.log(
+                            "[RETRY] Continuing agent loop with fresh state."
+                        );
+
+                        continue;
+                    }
+                }
+
+
+                // =================================================
+                // TERMINAL FAILURE
+                // =================================================
+
+                if (
+                    unsafeFailure
+                ) {
+
+                    console.warn(
+                        "[SAFETY] Unsafe action failure is terminal. No retry performed."
+                    );
+
+                } else {
+
+                    console.warn(
+                        "[RETRY] Retry limit reached or failure is not retryable. Stopping safely."
+                    );
+                }
+
+
+                showExecutionFailure(
+                    originalTask,
+                    analysis,
+                    currentCapture.sanitizedImage,
+                    executionResponse
+                );
+
+                    return;
+}
+
+
+// =================================================
+// SUCCESSFUL ACTION
+// =================================================
+
+currentActionRetryCount = 0;
+
+
+// =================================================
+// RECORD SUCCESSFUL ACTION
+// =================================================
+
+completedActions.push({
+    action:
+        analysis.actionType,
+
+    description:
+        describeAction(
+            analysis.action
+        ),
+
+    confidence:
+        analysis.confidence,
 
     plannerLatency:
         analysis.plannerLatency,
@@ -2284,16 +2530,16 @@ async function captureAndAnalyze() {
 });
 
 
-            console.log(
-                ` Step ${step} executed successfully.`
-            );
+console.log(
+    `Step ${step} executed successfully.`
+);
 
 
-            console.log(
-                " Completed actions:",
-                completedActions.length
-            );
-
+console.log(
+    "Completed actions:",
+    completedActions.length
+);
+           
 
             // =================================================
             // FINAL COMPOUND ACTION

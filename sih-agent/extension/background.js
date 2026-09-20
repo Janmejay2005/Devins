@@ -2,10 +2,92 @@
 // SIH PRIVACY BROWSER AGENT
 // background.js
 // ============================================================
+//
+// SECURITY BOUNDARY
+//
+// This service worker sits between:
+//     AI planner
+//         |
+//         v
+//     background.js
+//         |
+//         v
+//     content.js
+//         |
+//         v
+//     browser
+//
+// The planner is treated as UNTRUSTED input.
+//
+// background.js therefore:
+//
+// - validates planner actions
+// - removes unnecessary planner fields
+// - never logs TYPE values
+// - never forwards unsupported actions
+// - validates content-script responses
+// - applies a second PII metadata boundary
+// - strips sensitive URL components
+// - keeps raw screenshots inside the extension
+//
+// ============================================================
+
 
 console.log(
     "[SIH] Privacy Agent background service started"
 );
+
+
+// ============================================================
+// CONSTANTS
+// ============================================================
+
+const ALLOWED_ACTIONS = new Set([
+    "click",
+    "type",
+    "scroll",
+    "wait",
+    "none"
+]);
+
+
+// Maximum scroll amount allowed in one planner action.
+const MAX_SCROLL_AMOUNT = 1500;
+
+
+// Maximum wait requested by one planner action.
+const MAX_WAIT_MS = 5000;
+
+
+// Minimum wait so a wait action cannot become an
+// accidental zero-duration operation.
+const MIN_WAIT_MS = 100;
+
+
+// ============================================================
+// MESSAGE SENDER VALIDATION
+// ============================================================
+//
+// Only messages originating from this extension are accepted.
+//
+// This prevents an unexpected extension context from attempting
+// to invoke browser actions through this service worker.
+//
+// ============================================================
+
+function isTrustedExtensionSender(sender) {
+
+    if (
+        !sender ||
+        !sender.id
+    ) {
+        return false;
+    }
+
+    return (
+        sender.id === chrome.runtime.id
+    );
+}
 
 
 // ============================================================
@@ -14,77 +96,146 @@ console.log(
 //
 // Defense-in-depth.
 //
-// The content script should already avoid serializing PII values.
-// The background service applies a second privacy boundary before
-// any metadata can reach the network layer.
+// content.js already removes PII values from serializable
+// detection metadata.
+//
+// background.js performs the same boundary again.
 //
 // IMPORTANT:
-// `value` is intentionally NOT included.
+//
+// detection.value
+// detection.text
+// detection.rawValue
+//
+// and similar fields are NEVER copied.
+//
+// Only non-sensitive classification + geometry is retained.
+//
 // ============================================================
 
-function sanitizeDetectionMetadata(detections) {
+function sanitizeDetectionMetadata(
+    detections
+) {
 
-    if (!Array.isArray(detections)) {
+    if (
+        !Array.isArray(detections)
+    ) {
         return [];
     }
 
+
     return detections
-        .map((detection) => {
+        .map(
+            (
+                detection
+            ) => {
 
-            if (
-                !detection ||
-                typeof detection !== "object"
-            ) {
-                return null;
-            }
+                if (
+                    !detection ||
+                    typeof detection !== "object" ||
+                    Array.isArray(detection)
+                ) {
+                    return null;
+                }
 
-            return {
-                id: String(
-                    detection.id || ""
-                ),
 
-                type: String(
-                    detection.type || ""
-                ),
+                const sourceRect =
+                    detection.rect;
 
-                source: String(
-                    detection.source || ""
-                ),
 
-                tagName: String(
-                    detection.tagName || ""
-                ),
+                let rect = null;
 
-                rect: detection.rect
-                    ? {
-                        left: Number(
-                            detection.rect.left
-                        ),
 
-                        top: Number(
-                            detection.rect.top
-                        ),
+                if (
+                    sourceRect &&
+                    typeof sourceRect === "object"
+                ) {
 
-                        right: Number(
-                            detection.rect.right
-                        ),
+                    const left =
+                        Number(
+                            sourceRect.left
+                        );
 
-                        bottom: Number(
-                            detection.rect.bottom
-                        ),
+                    const top =
+                        Number(
+                            sourceRect.top
+                        );
 
-                        width: Number(
-                            detection.rect.width
-                        ),
+                    const right =
+                        Number(
+                            sourceRect.right
+                        );
 
-                        height: Number(
-                            detection.rect.height
-                        )
+                    const bottom =
+                        Number(
+                            sourceRect.bottom
+                        );
+
+                    const width =
+                        Number(
+                            sourceRect.width
+                        );
+
+                    const height =
+                        Number(
+                            sourceRect.height
+                        );
+
+
+                    if (
+                        [
+                            left,
+                            top,
+                            right,
+                            bottom,
+                            width,
+                            height
+                        ]
+                            .every(
+                                Number.isFinite
+                            )
+                    ) {
+
+                        rect = {
+                            left,
+                            top,
+                            right,
+                            bottom,
+                            width,
+                            height
+                        };
                     }
-                    : null
-            };
-        })
-        .filter(Boolean);
+                }
+
+
+                return {
+                    id:
+                        String(
+                            detection.id || ""
+                        ),
+
+                    type:
+                        String(
+                            detection.type || ""
+                        ),
+
+                    source:
+                        String(
+                            detection.source || ""
+                        ),
+
+                    tagName:
+                        String(
+                            detection.tagName || ""
+                        ),
+
+                    rect
+                };
+            }
+        )
+        .filter(
+            Boolean
+        );
 }
 
 
@@ -92,34 +243,32 @@ function sanitizeDetectionMetadata(detections) {
 // PRIVACY-SAFE ACTION LOGGING
 // ============================================================
 //
-// NEVER log the complete action object.
+// NEVER log the complete planner action.
 //
-// A type action can contain:
-// {
+// TYPE actions may contain:
+//
 //     text: "Amit Kumar"
-// }
 //
-// or worse:
-// {
-//     text: "password123"
-// }
+// or potentially sensitive text.
 //
-// Therefore only non-sensitive metadata is logged.
+// Only action metadata is logged.
 //
-// The REAL action object is still passed to the content script.
-// Only the console representation is sanitized.
 // ============================================================
 
-function getSafeActionLog(action) {
+function getSafeActionLog(
+    action
+) {
 
     if (
         !action ||
         typeof action !== "object"
     ) {
+
         return {
             action: "none"
         };
     }
+
 
     const actionType =
         String(
@@ -130,49 +279,59 @@ function getSafeActionLog(action) {
             .toLowerCase()
             .trim();
 
-    const safe = {
-        action: actionType,
 
-        confidence: Number(
-            action.confidence || 0
+    const rawConfidence =
+        Number(
+            action.confidence
+        );
+
+
+    const confidence =
+        Number.isFinite(
+            rawConfidence
         )
+            ? Math.min(
+                1,
+                Math.max(
+                    0,
+                    rawConfidence
+                )
+            )
+            : 0;
+
+
+    const safe = {
+        action:
+            actionType,
+
+        confidence
     };
 
 
-    // --------------------------------------------------------
-    // CLICK
-    // --------------------------------------------------------
-
     if (
-        actionType === "click"
-    ) {
-
-        safe.target = {
-            x: Number(
+    actionType === "click"
+) {
+    safe.target = {
+        x:
+            Number(
                 action.x ??
                 action.target?.x ??
                 0
             ),
 
-            y: Number(
+        y:
+            Number(
                 action.y ??
                 action.target?.y ??
                 0
-            )
-        };
-    }
+            ),
 
+        submitIntent:
+            action?.submitIntent === true ||
+            action?.target?.submitIntent === true
+    };
+}
 
-    // --------------------------------------------------------
-    // TYPE
-    // --------------------------------------------------------
-    //
-    // NEVER log:
-    // action.text
-    // action.value
-    //
-    // Only log its length.
-    // --------------------------------------------------------
 
     if (
         actionType === "type"
@@ -186,10 +345,6 @@ function getSafeActionLog(action) {
             ).length;
     }
 
-
-    // --------------------------------------------------------
-    // SCROLL / WAIT
-    // --------------------------------------------------------
 
     if (
         actionType === "scroll" ||
@@ -214,9 +369,12 @@ function getSafeActionLog(action) {
 // ============================================================
 //
 // Never transmit:
+//
 // - query parameters
 // - URL fragments
 // - username/password from URL
+// - tokens
+// - email addresses embedded in query strings
 //
 // Example:
 //
@@ -225,18 +383,28 @@ function getSafeActionLog(action) {
 // becomes:
 //
 // https://example.com/form
+//
 // ============================================================
 
-function getPrivacySafePageUrl(rawUrl) {
+function getPrivacySafePageUrl(
+    rawUrl
+) {
 
-    if (!rawUrl) {
+    if (
+        !rawUrl
+    ) {
+
         return "";
     }
+
 
     try {
 
         const url =
-            new URL(rawUrl);
+            new URL(
+                rawUrl
+            );
+
 
         return (
             `${url.origin}${url.pathname}`
@@ -252,11 +420,30 @@ function getPrivacySafePageUrl(rawUrl) {
 // ============================================================
 // CAPTURE + SANITIZE
 // ============================================================
+//
+// IMPORTANT PRIVACY GUARANTEE:
+//
+// The raw screenshot is:
+//
+//     captureVisibleTab()
+//             |
+//             v
+//     content.js
+//             |
+//             v
+//     local redaction
+//             |
+//             v
+//     sanitized screenshot
+//
+// Raw screenshot is NEVER returned from this function.
+//
+// ============================================================
 
 async function captureAndSanitize() {
 
     console.log(
-        "[CAPTURE] Starting local capture and sanitization..."
+        "[CAPTURE] Starting local capture and sanitization."
     );
 
 
@@ -272,7 +459,7 @@ async function captureAndSanitize() {
 
 
     if (
-        !tabs ||
+        !Array.isArray(tabs) ||
         tabs.length === 0
     ) {
 
@@ -286,10 +473,25 @@ async function captureAndSanitize() {
         tabs[0];
 
 
-    if (!tab.id) {
+    if (
+        !tab ||
+        !tab.id
+    ) {
 
         throw new Error(
             "Active tab has no valid ID."
+        );
+    }
+
+
+    if (
+        !Number.isInteger(
+            tab.windowId
+        )
+    ) {
+
+        throw new Error(
+            "Active tab has no valid window ID."
         );
     }
 
@@ -322,8 +524,10 @@ async function captureAndSanitize() {
 
         console.error(
             "[CAPTURE] PREPARE_CAPTURE failed:",
-            error?.message || error
+            error?.message ||
+            error
         );
+
 
         throw new Error(
             "Could not communicate with content script. " +
@@ -334,10 +538,21 @@ async function captureAndSanitize() {
 
     if (
         !prepareResponse ||
-        !prepareResponse.success
+        typeof prepareResponse !== "object"
     ) {
 
         throw new Error(
+            "Privacy engine returned an invalid response."
+        );
+    }
+
+
+    if (
+        prepareResponse.success !== true
+    ) {
+
+        throw new Error(
+            prepareResponse.error ||
             "Privacy engine could not prepare the capture."
         );
     }
@@ -345,7 +560,11 @@ async function captureAndSanitize() {
 
     console.log(
         "[PRIVACY] Local PII detection completed:",
-        prepareResponse.detections?.length || 0,
+        Array.isArray(
+            prepareResponse.detections
+        )
+            ? prepareResponse.detections.length
+            : 0,
         "regions"
     );
 
@@ -355,10 +574,12 @@ async function captureAndSanitize() {
     // ========================================================
     //
     // IMPORTANT:
-    // This happens AFTER prepareResponse exists.
     //
-    // The previous version attempted to use
-    // prepareResponse before it was declared.
+    // prepareResponse must exist before it is used.
+    //
+    // Only sanitized detection metadata leaves the background
+    // capture boundary.
+    //
     // ========================================================
 
     const safeDetections =
@@ -388,17 +609,25 @@ async function captureAndSanitize() {
 
         console.error(
             "[CAPTURE] Screenshot capture failed:",
-            error?.message || error
+            error?.message ||
+            error
         );
+
 
         throw new Error(
             "Could not capture the current screen: " +
-            (error?.message || "Unknown capture error")
+            (
+                error?.message ||
+                "Unknown capture error"
+            )
         );
     }
 
 
-    if (!screenshot) {
+    if (
+        typeof screenshot !== "string" ||
+        screenshot.length === 0
+    ) {
 
         throw new Error(
             "Browser returned an empty screenshot."
@@ -415,14 +644,13 @@ async function captureAndSanitize() {
     // LOCAL SANITIZATION
     // ========================================================
     //
-    // IMPORTANT:
-    //
     // The raw screenshot exists only inside the extension.
     //
-    // It is sent to the content script solely so that local
-    // redaction can be performed.
+    // It is sent to content.js solely for local redaction.
     //
-    // The raw screenshot is NEVER sent to FastAPI.
+    // It is NEVER returned to popup.js.
+    // It is NEVER sent directly to FastAPI.
+    //
     // ========================================================
 
     let sanitizeResponse;
@@ -438,7 +666,6 @@ async function captureAndSanitize() {
                         "SANITIZE_SCREENSHOT",
 
                     screenshot:
-
                         screenshot,
 
                     detections:
@@ -450,30 +677,51 @@ async function captureAndSanitize() {
 
         console.error(
             "[PRIVACY] SANITIZE_SCREENSHOT failed:",
-            error?.message || error
+            error?.message ||
+            error
         );
+
 
         throw new Error(
             "Could not sanitize the screenshot: " +
-            (error?.message || "Unknown sanitization error")
+            (
+                error?.message ||
+                "Unknown sanitization error"
+            )
+        );
+    }
+
+
+    // Explicitly release our reference to the raw screenshot
+    // as soon as local sanitization has completed.
+    screenshot = null;
+
+
+    if (
+        !sanitizeResponse ||
+        typeof sanitizeResponse !== "object"
+    ) {
+
+        throw new Error(
+            "Sanitization returned an invalid response."
         );
     }
 
 
     if (
-        !sanitizeResponse ||
-        !sanitizeResponse.success
+        sanitizeResponse.success !== true
     ) {
 
         throw new Error(
-            sanitizeResponse?.error ||
+            sanitizeResponse.error ||
             "Screenshot sanitization failed."
         );
     }
 
 
     if (
-        !sanitizeResponse.sanitizedImage
+        typeof sanitizeResponse.sanitizedImage !== "string" ||
+        sanitizeResponse.sanitizedImage.length === 0
     ) {
 
         throw new Error(
@@ -491,9 +739,13 @@ async function captureAndSanitize() {
     // SANITIZED DOM METADATA
     // ========================================================
     //
-    // Only metadata is allowed to leave the extension.
+    // content.js is responsible for producing safe DOM
+    // metadata. background.js intentionally does not copy
+    // arbitrary DOM values.
     //
-    // We intentionally do NOT log the DOM elements.
+    // The existing popup privacy gate performs another
+    // allowlist check before the network request.
+    //
     // ========================================================
 
     const safeDomElements =
@@ -527,7 +779,7 @@ async function captureAndSanitize() {
         detections:
             safeDetections,
 
-        // Safe DOM metadata.
+        // DOM metadata produced by the privacy engine.
         dom_elements:
             safeDomElements,
 
@@ -536,12 +788,15 @@ async function captureAndSanitize() {
             prepareResponse.viewport ||
             null,
 
-        // URL without query parameters or fragments.
+        // Privacy-safe URL.
         page_url:
             getPrivacySafePageUrl(
                 tab.url
             ),
 
+        // These IDs are extension-internal metadata.
+        // They are not sent to FastAPI by the background
+        // service itself.
         tab_id:
             tab.id,
 
@@ -552,153 +807,183 @@ async function captureAndSanitize() {
 
 
 // ============================================================
-// NORMALIZE AI ACTION
+// NORMALIZE + VALIDATE AI ACTION
 // ============================================================
 //
-// FAST planner returns:
+// The planner is UNTRUSTED INPUT.
 //
-// {
-//     "action": "click",
-//     "x": 604,
-//     "y": 310,
-//     "text": "",
-//     "amount": 0,
-//     "confidence": 0.98,
-//     "reason": "Matched Full Name"
-// }
+// Do not trust:
 //
-// content.js expects:
+//     action.type
 //
-// {
-//     "type": "click",
-//     "target": {
-//         "x": 604,
-//         "y": 310
-//     }
-// }
+// Do not trust:
+//
+//     action.action
+//
+// Do not trust:
+//
+//     action.x
+//
+// Do not trust:
+//
+//     action.y
+//
+// Do not trust:
+//
+//     action.text
+//
+// Every supported action must pass this boundary.
+//
 // ============================================================
 
-function normalizeBrowserAction(action) {
-
+function normalizeBrowserAction(
+    action
+) {
 
     // ========================================================
-    // INVALID ACTION
+    // ACTION OBJECT VALIDATION
     // ========================================================
 
     if (
         !action ||
-        typeof action !== "object"
+        typeof action !== "object" ||
+        Array.isArray(action)
     ) {
 
-        console.warn(
-            "[ACTION] Invalid AI action received."
-        );
-
         return {
-
             type:
                 "none",
 
             error:
-                "No valid AI action was received."
+                "Invalid AI action object."
         };
     }
 
 
     // ========================================================
-    // ALREADY NORMALIZED
-    // ========================================================
-
-    if (
-        action.type
-    ) {
-
-        console.log(
-            "[ACTION] Action already normalized:",
-            getSafeActionLog(action)
-        );
-
-        return action;
-    }
-
-
-    // ========================================================
-    // READ NEW ACTION FORMAT
+    // READ ACTION NAME
     // ========================================================
 
     const actionName =
         String(
-            action.action || ""
+            action.action ||
+            action.type ||
+            ""
         )
             .toLowerCase()
             .trim();
 
 
-    console.log(
-        "[ACTION] Planner action:",
-        actionName
-    );
+    // ========================================================
+    // ALLOWED ACTION CHECK
+    // ========================================================
+
+    if (
+        !ALLOWED_ACTIONS.has(
+            actionName
+        )
+    ) {
+
+        return {
+            type:
+                "none",
+
+            error:
+                `Unsupported AI action: ${
+                    actionName ||
+                    "missing"
+                }`
+        };
+    }
+
+
+    // ========================================================
+    // CONFIDENCE
+    // ========================================================
+    //
+    // Confidence is metadata, not authorization.
+    //
+    // It must never become NaN or Infinity.
+    //
+    // ========================================================
+
+    const rawConfidence =
+        Number(
+            action.confidence
+        );
+
+
+    const confidence =
+        Number.isFinite(
+            rawConfidence
+        )
+            ? Math.min(
+                1,
+                Math.max(
+                    0,
+                    rawConfidence
+                )
+            )
+            : 0;
+
+
+    // ========================================================
+    // NONE
+    // ========================================================
+
+    if (
+        actionName === "none"
+    ) {
+
+        return {
+            type:
+                "none",
+
+            confidence:
+                confidence
+        };
+    }
 
 
     // ========================================================
     // CLICK
     // ========================================================
 
+    if (actionName === "click") {
+    const x = Number(
+        action?.x ??
+        action?.target?.x
+    );
+
+    const y = Number(
+        action?.y ??
+        action?.target?.y
+    );
+
     if (
-        actionName ===
-        "click"
+        !Number.isFinite(x) ||
+        !Number.isFinite(y)
     ) {
+        throw new Error(
+            "Invalid click coordinates."
+        );
+    }
 
-        const x =
-            Number(
-                action.x
-            );
+    const submitIntent =
+        action?.submitIntent === true ||
+        action?.target?.submitIntent === true;
 
+    return {
+        type: "click",
+        target: {
+            x: x,
+            y: y,
+            submitIntent: submitIntent
+        },
+        submitIntent: submitIntent,
+        confidence: confidence
+    };
 
-        const y =
-            Number(
-                action.y
-            );
-
-
-        if (
-            !Number.isFinite(x) ||
-            !Number.isFinite(y)
-        ) {
-
-            return {
-
-                type:
-                    "none",
-
-                error:
-                    "AI returned invalid click coordinates."
-            };
-        }
-
-
-        return {
-
-            type:
-                "click",
-
-            target: {
-
-                x:
-                    x,
-
-                y:
-                    y
-            },
-
-            confidence:
-                action.confidence ??
-                0,
-
-            reason:
-                action.reason ||
-                ""
-        };
     }
 
 
@@ -707,26 +992,21 @@ function normalizeBrowserAction(action) {
     // ========================================================
 
     if (
-        actionName ===
-        "type"
+        actionName === "type"
     ) {
 
         const x =
             Number(
-                action.x
+                action.x ??
+                action.target?.x
             );
 
 
         const y =
             Number(
-                action.y
+                action.y ??
+                action.target?.y
             );
-
-
-        const value =
-            action.text ??
-            action.value ??
-            "";
 
 
         if (
@@ -735,7 +1015,6 @@ function normalizeBrowserAction(action) {
         ) {
 
             return {
-
                 type:
                     "none",
 
@@ -745,36 +1024,137 @@ function normalizeBrowserAction(action) {
         }
 
 
-        return {
+        if (
+            x < 0 ||
+            y < 0
+        ) {
 
-            type:
-                "type",
+            return {
+                type:
+                    "none",
 
-            target: {
+                error:
+                    "AI returned negative type coordinates."
+            };
+        }
 
-                x:
-                    x,
 
-                y:
-                    y
-            },
+        // ====================================================
+        // EXPLICIT VALUE REQUIRED
+        // ====================================================
 
-            // IMPORTANT:
-            // The actual value is retained internally for execution.
-            // It is NEVER logged.
-            value:
-                String(
-                    value
-                ),
+        const value =
+            action.text ??
+            action.value;
 
-            confidence:
-                action.confidence ??
-                0,
 
-            reason:
-                action.reason ||
-                ""
-        };
+        if (
+            value === undefined ||
+            value === null
+        ) {
+
+            return {
+                type:
+                    "none",
+
+                error:
+                    "TYPE action is missing an explicit value."
+            };
+        }
+
+
+        const stringValue =
+            String(
+                value
+            );
+
+
+        if (
+            stringValue.length === 0
+        ) {
+
+            return {
+                type:
+                    "none",
+
+                error:
+                    "TYPE action contains an empty value."
+            };
+        }
+
+
+        // ====================================================
+        // PROTECTED FIELD METADATA
+        // ====================================================
+        //
+        // The background cannot inspect the live DOM.
+        //
+        // content.js performs the final DOM-level validation.
+        //
+        // However, if the planner explicitly tells us that the
+        // target is a credential field, reject it here too.
+        //
+        // ====================================================
+
+        const targetMetadata =
+            [
+                action.fieldType,
+                action.inputType,
+                action.name,
+                action.id,
+                action.placeholder,
+                action.autocomplete,
+                action.role,
+                action.targetType
+            ]
+                .filter(
+                    value =>
+                        value !== undefined &&
+                        value !== null
+                )
+                .join(" ")
+                .toLowerCase();
+
+
+        if (
+            /\b(password|passwd|passcode|credential|credentials|otp|one[- ]time[- ]password|security[- ]code|pin)\b/i
+                .test(
+                    targetMetadata
+                )
+        ) {
+
+            return {
+                type:
+                    "none",
+
+                error:
+                    "TYPE action targeted a protected credential field."
+            };
+        }
+
+
+        // ====================================================
+        // RETURN SAFE TYPE ACTION
+        // ====================================================
+        //
+        // The actual value is required for the local browser
+        // operation, but it is NEVER included in console logs.
+        //
+        // ====================================================
+
+        const submitIntent =
+    action?.submitIntent === true ||
+    action?.target?.submitIntent === true;
+
+return {
+    type: "type",
+    target: {
+        x: x,
+        y: y
+    },
+    text: stringValue,
+    confidence: confidence
+};
     }
 
 
@@ -783,15 +1163,13 @@ function normalizeBrowserAction(action) {
     // ========================================================
 
     if (
-        actionName ===
-        "scroll"
+        actionName === "scroll"
     ) {
 
         let amount =
             Number(
                 action.amount ??
-                action.value ??
-                500
+                action.value
             );
 
 
@@ -801,8 +1179,38 @@ function normalizeBrowserAction(action) {
             )
         ) {
 
-            amount =
-                500;
+            return {
+                type:
+                    "none",
+
+                error:
+                    "AI returned an invalid scroll amount."
+            };
+        }
+
+
+        // Bound one scroll operation.
+        amount =
+            Math.max(
+                -MAX_SCROLL_AMOUNT,
+                Math.min(
+                    MAX_SCROLL_AMOUNT,
+                    amount
+                )
+            );
+
+
+        if (
+            amount === 0
+        ) {
+
+            return {
+                type:
+                    "none",
+
+                error:
+                    "AI returned a zero scroll amount."
+            };
         }
 
 
@@ -815,12 +1223,7 @@ function normalizeBrowserAction(action) {
                 amount,
 
             confidence:
-                action.confidence ??
-                0,
-
-            reason:
-                action.reason ||
-                ""
+                confidence
         };
     }
 
@@ -830,15 +1233,13 @@ function normalizeBrowserAction(action) {
     // ========================================================
 
     if (
-        actionName ===
-        "wait"
+        actionName === "wait"
     ) {
 
         let milliseconds =
             Number(
                 action.amount ??
-                action.value ??
-                1000
+                action.value
             );
 
 
@@ -848,9 +1249,24 @@ function normalizeBrowserAction(action) {
             )
         ) {
 
-            milliseconds =
-                1000;
+            return {
+                type:
+                    "none",
+
+                error:
+                    "AI returned an invalid wait duration."
+            };
         }
+
+
+        milliseconds =
+            Math.max(
+                MIN_WAIT_MS,
+                Math.min(
+                    MAX_WAIT_MS,
+                    milliseconds
+                )
+            );
 
 
         return {
@@ -862,50 +1278,14 @@ function normalizeBrowserAction(action) {
                 milliseconds,
 
             confidence:
-                action.confidence ??
-                0,
-
-            reason:
-                action.reason ||
-                ""
+                confidence
         };
     }
 
 
     // ========================================================
-    // NONE
+    // FALLBACK
     // ========================================================
-
-    if (
-        actionName ===
-        "none"
-    ) {
-
-        return {
-
-            type:
-                "none",
-
-            confidence:
-                action.confidence ??
-                0,
-
-            reason:
-                action.reason ||
-                ""
-        };
-    }
-
-
-    // ========================================================
-    // UNKNOWN ACTION
-    // ========================================================
-
-    console.error(
-        "[ACTION] Unsupported AI action:",
-        actionName
-    );
-
 
     return {
 
@@ -913,10 +1293,7 @@ function normalizeBrowserAction(action) {
             "none",
 
         error:
-            `Unsupported AI action: ${
-                actionName ||
-                "missing"
-            }`
+            "Unsupported browser action."
     };
 }
 
@@ -924,30 +1301,32 @@ function normalizeBrowserAction(action) {
 // ============================================================
 // EXECUTE BROWSER ACTION
 // ============================================================
+//
+// IMPORTANT:
+//
+// The raw planner action is NEVER forwarded directly.
+//
+// Flow:
+//
+//     planner action
+//           |
+//           v
+//     normalizeBrowserAction()
+//           |
+//           v
+//     validated action
+//           |
+//           v
+//     content.js
+//
+// ============================================================
 
 async function executeBrowserAction(
     action
 ) {
 
     // ========================================================
-    // PRIVACY-SAFE ACTION LOG
-    // ========================================================
-    //
-    // DO NOT replace this with:
-    //
-    // console.log(action)
-    //
-    // because type actions may contain sensitive text.
-    // ========================================================
-
-    console.log(
-        "[ACTION]",
-        getSafeActionLog(action)
-    );
-
-
-    // ========================================================
-    // NORMALIZE ACTION
+    // NORMALIZE + VALIDATE
     // ========================================================
 
     const normalizedAction =
@@ -956,16 +1335,38 @@ async function executeBrowserAction(
         );
 
 
-    // ========================================================
-    // SAFE NORMALIZED ACTION LOG
-    // ========================================================
-
     console.log(
-        "[ACTION] Normalized:",
+        "[ACTION] Validated planner action:",
         getSafeActionLog(
             normalizedAction
         )
     );
+
+
+    // ========================================================
+    // REJECT INVALID ACTION
+    // ========================================================
+
+    if (
+        normalizedAction.type === "none" &&
+        normalizedAction.error
+    ) {
+
+        console.warn(
+            "[ACTION] Planner action rejected:",
+            normalizedAction.error
+        );
+
+
+        return {
+
+            success:
+                false,
+
+            error:
+                normalizedAction.error
+        };
+    }
 
 
     // ========================================================
@@ -980,36 +1381,8 @@ async function executeBrowserAction(
 
 
     if (
-        !tabs ||
+        !Array.isArray(tabs) ||
         tabs.length === 0
-    ) {
-
-        throw new Error(
-            "No active tab found."
-        );
-    }
-
-
-    const tab =
-        tabs[0];
-
-
-    if (!tab.id) {
-
-        throw new Error(
-            "Active tab has no valid ID."
-        );
-    }
-
-
-    // ========================================================
-    // UNKNOWN ACTION SAFETY CHECK
-    // ========================================================
-
-    if (
-        normalizedAction.type ===
-            "none" &&
-        normalizedAction.error
     ) {
 
         return {
@@ -1018,13 +1391,33 @@ async function executeBrowserAction(
                 false,
 
             error:
-                normalizedAction.error
+                "No active browser tab found."
+        };
+    }
+
+
+    const tab =
+        tabs[0];
+
+
+    if (
+        !tab ||
+        !tab.id
+    ) {
+
+        return {
+
+            success:
+                false,
+
+            error:
+                "Active tab has no valid ID."
         };
     }
 
 
     // ========================================================
-    // SEND ACTION TO CONTENT SCRIPT
+    // SEND ONLY VALIDATED ACTION
     // ========================================================
 
     let response;
@@ -1033,7 +1426,7 @@ async function executeBrowserAction(
     try {
 
         console.log(
-            "[ACTION] Sending action to content script."
+            "[ACTION] Sending validated action to content script."
         );
 
 
@@ -1052,47 +1445,105 @@ async function executeBrowserAction(
     } catch (error) {
 
         console.error(
-            "[ACTION] Action execution failed:",
-            error?.message || error
+            "[ACTION] Content script communication failed:",
+            error?.message ||
+            error
         );
 
-        throw new Error(
-            "Could not communicate with content script: " +
-            (error?.message || "Unknown error")
-        );
+
+        return {
+
+            success:
+                false,
+
+            error:
+                "Could not communicate with content script: " +
+                (
+                    error?.message ||
+                    "Unknown error"
+                )
+        };
     }
 
 
     // ========================================================
-    // LOG RESULT SAFELY
+    // STRICT RESPONSE VALIDATION
     // ========================================================
     //
-    // Do NOT dump the complete response object.
+    // An undefined or malformed response is NOT success.
     //
-    // A future content script response might contain sensitive
-    // information.
+    // ========================================================
+
+    if (
+        !response ||
+        typeof response !== "object"
+    ) {
+
+        return {
+
+            success:
+                false,
+
+            error:
+                "Content script returned an invalid response."
+        };
+    }
+
+
+    if (
+    response.success !== true
+) {
+    return {
+        success: false,
+
+        action:
+            response.action ||
+            normalizedAction.type,
+
+        retryable:
+            response.retryable === true,
+
+        unsafe:
+            response.unsafe === true,
+
+        error:
+            response.error ||
+            response.message ||
+            "Browser action was rejected."
+    };
+
+    }
+
+
+    // ========================================================
+    // SAFE RESULT
     // ========================================================
 
     console.log(
-        "[ACTION] Content script execution:",
+        "[ACTION] Browser action completed:",
         {
             success:
-                response?.success === true,
+                true,
 
             action:
-                response?.action ||
-                normalizedAction.type ||
-                "none",
-
-            error:
-                response?.error
-                    ? String(response.error)
-                    : undefined
+                response.action ||
+                normalizedAction.type
         }
     );
 
 
-    return response;
+    return {
+
+        success:
+            true,
+
+        action:
+            response.action ||
+            normalizedAction.type,
+
+        result:
+            response
+    };
 }
 
 
@@ -1122,6 +1573,39 @@ chrome.runtime.onMessage.addListener(
             "CAPTURE_AND_SANITIZE"
         ) {
 
+            // ------------------------------------------------
+            // TRUST BOUNDARY
+            // ------------------------------------------------
+
+            if (
+                !isTrustedExtensionSender(
+                    sender
+                )
+            ) {
+
+                console.warn(
+                    "[CAPTURE] Rejected request from an unexpected sender."
+                );
+
+
+                sendResponse({
+
+                    success:
+                        false,
+
+                    error:
+                        "Unauthorized capture request."
+                });
+
+
+                return false;
+            }
+
+
+            // ------------------------------------------------
+            // ASYNC CAPTURE
+            // ------------------------------------------------
+
             captureAndSanitize()
 
                 .then(
@@ -1143,7 +1627,8 @@ chrome.runtime.onMessage.addListener(
 
                         console.error(
                             "[CAPTURE] Pipeline error:",
-                            error?.message || error
+                            error?.message ||
+                            error
                         );
 
 
@@ -1161,20 +1646,49 @@ chrome.runtime.onMessage.addListener(
 
 
             // Keep the message channel open for
-            // asynchronous response.
+            // the asynchronous response.
 
             return true;
         }
 
 
         // ====================================================
-        // EXECUTE ACTION
+        // EXECUTE BROWSER ACTION
         // ====================================================
 
         if (
             message?.type ===
             "EXECUTE_BROWSER_ACTION"
         ) {
+
+            // ------------------------------------------------
+            // TRUST BOUNDARY
+            // ------------------------------------------------
+
+            if (
+                !isTrustedExtensionSender(
+                    sender
+                )
+            ) {
+
+                console.warn(
+                    "[ACTION] Rejected request from an unexpected sender."
+                );
+
+
+                sendResponse({
+
+                    success:
+                        false,
+
+                    error:
+                        "Unauthorized action request."
+                });
+
+
+                return false;
+            }
+
 
             console.log(
                 "[ACTION] EXECUTE_BROWSER_ACTION received:",
@@ -1184,6 +1698,10 @@ chrome.runtime.onMessage.addListener(
             );
 
 
+            // ------------------------------------------------
+            // EXECUTE ASYNC
+            // ------------------------------------------------
+
             executeBrowserAction(
                 message.action
             )
@@ -1191,22 +1709,32 @@ chrome.runtime.onMessage.addListener(
                 .then(
                     result => {
 
-                        console.log(
-                            "[ACTION] Browser action completed:",
-                            {
+                        if (
+                            result?.success === true
+                        ) {
+
+                            sendResponse({
+
                                 success:
-                                    result?.success !== false
-                            }
-                        );
+                                    true,
+
+                                result:
+                                    result
+                            });
+
+
+                            return;
+                        }
 
 
                         sendResponse({
 
                             success:
-                                result?.success !== false,
+                                false,
 
-                            result:
-                                result
+                            error:
+                                result?.error ||
+                                "Browser action was rejected."
                         });
                     }
                 )
@@ -1215,8 +1743,9 @@ chrome.runtime.onMessage.addListener(
                     error => {
 
                         console.error(
-                            "[ACTION] Browser action error:",
-                            error?.message || error
+                            "[ACTION] Unexpected browser action error:",
+                            error?.message ||
+                            error
                         );
 
 
@@ -1233,7 +1762,8 @@ chrome.runtime.onMessage.addListener(
                 );
 
 
-            // Keep the message channel open.
+            // Keep the message channel open for
+            // the asynchronous response.
 
             return true;
         }

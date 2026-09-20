@@ -1931,162 +1931,79 @@ def fast_plan(
     detections: List[Dict[str, Any]]
 ) -> Dict[str, Any]:
 
-    start =time.perf_counter()
-
+    start = time.perf_counter()
 
     print()
+    print("==========================================")
+    print("[ACTION PLANNER]")
+    print("==========================================")
+    print("Mode                 : fast")
+    print(f"Safe DOM elements    : {len(dom_elements)}")
+    print(f"Local PII detections : {len(detections)}")
+    print(f"Task                 : {task}")
 
-    print(
-        "=========================================="
-    )
-
-    print(
-        "[ACTION PLANNER]"
-    )
-
-    print(
-        "=========================================="
-    )
-
-    print(
-        "Mode                 : fast"
-    )
-
-    print(
-        f"Safe DOM elements    : "
-        f"{len(dom_elements)}"
-    )
-
-    print(
-        f"Local PII detections : "
-        f"{len(detections)}"
-    )
-
-    print(
-        f"Task                 : "
-        f"{task}"
-    )
-
-
-    t =task_lower(
-            task
-        )
-
+    t = task_lower(task)
 
     # ========================================================
     # EXPLICIT SCROLL DOWN
     # ========================================================
 
-    if has_explicit_scroll_down(
-        task
-    ):
+    if has_explicit_scroll_down(task):
 
         latency = (
             time.perf_counter() -
             start
         ) * 1000
 
-
         return {
-
-            "action":
-                "scroll",
-
-            "x":
-                0,
-
-            "y":
-                0,
-
-            "text":
-                "",
-
-            "amount":
-                600,
-
-            "confidence":
-                0.99,
-
-            "reason":
-                "Explicit scroll-down task.",
-
-            "vlm_latency_ms":
-                round(
-                    latency,
-                    2
-                )
+            "action": "scroll",
+            "x": 0,
+            "y": 0,
+            "text": "",
+            "amount": 600,
+            "confidence": 0.99,
+            "reason": "Explicit scroll-down task.",
+            "vlm_latency_ms": round(latency, 2)
         }
-
 
     # ========================================================
     # EXPLICIT SCROLL UP
     # ========================================================
 
-    if has_explicit_scroll_up(
-        task
-    ):
+    if has_explicit_scroll_up(task):
 
         latency = (
             time.perf_counter() -
             start
         ) * 1000
 
-
         return {
-
-            "action":
-                "scroll",
-
-            "x":
-                0,
-
-            "y":
-                0,
-
-            "text":
-                "",
-
-            "amount":
-                -600,
-
-            "confidence":
-                0.99,
-
-            "reason":
-                "Explicit scroll-up task.",
-
-            "vlm_latency_ms":
-                round(
-                    latency,
-                    2
-                )
+            "action": "scroll",
+            "x": 0,
+            "y": 0,
+            "text": "",
+            "amount": -600,
+            "confidence": 0.99,
+            "reason": "Explicit scroll-up task.",
+            "vlm_latency_ms": round(latency, 2)
         }
-
 
     # ========================================================
     # TYPE
     # ========================================================
 
-    if is_type_task(
-        task
-    ):
+    if is_type_task(task):
 
-        value =extract_explicit_type_value(
-                task
-            )
+        value = extract_explicit_type_value(task)
 
-        target =extract_requested_target(
-                task
-            )
+        target = extract_requested_target(task)
 
-
-        element, state =find_target_state(
-                dom_elements,
-                target,
-                detections,
-                require_input=True
-            )
-
+        element, state = find_target_state(
+            dom_elements,
+            target,
+            detections,
+            require_input=True
+        )
 
         # ----------------------------------------------------
         # Target exists but is off-screen.
@@ -2104,7 +2021,6 @@ def fast_plan(
                 start
             )
 
-
         # ----------------------------------------------------
         # Target visible.
         # ----------------------------------------------------
@@ -2114,16 +2030,12 @@ def fast_plan(
             value is not None
         ):
 
-            x, y =element_center(
-                    element
-                )
-
+            x, y = element_center(element)
 
             latency = (
                 time.perf_counter() -
                 start
             ) * 1000
-
 
             print(
                 "[FAST PLANNER] "
@@ -2132,104 +2044,76 @@ def fast_plan(
                 f"latency={latency:.2f} ms"
             )
 
+            print("[FAST] Action: type")
+
+            print(
+                f"[FAST] Target: ({x}, {y})"
+            )
+
+            print(
+                f"[FAST] Value length: {len(value)}"
+            )
 
             return {
-
-                "action":
-                    "type",
-
-                "x":
-                    x,
-
-                "y":
-                    y,
-
-                "text":
-                    value,
-
-                "amount":
-                    0,
-
-                "confidence":
-                    0.98,
-
-                "reason":
-                    (
-                        f"Matched '{target}' from safe DOM "
-                        "metadata and used only the value "
-                        "explicitly supplied in the user task."
-                    ),
-
-                "vlm_latency_ms":
-                    round(
-                        latency,
-                        2
-                    )
+                "action": "type",
+                "x": x,
+                "y": y,
+                "text": value,
+                "amount": 0,
+                "confidence": 0.98,
+                "reason": (
+                    f"Matched '{target}' from safe DOM "
+                    "metadata and used only the explicitly "
+                    "provided task value."
+                ),
+                "vlm_latency_ms": round(
+                    latency,
+                    2
+                )
             }
 
+        # ----------------------------------------------------
+        # Type task could not be safely resolved.
+        # ----------------------------------------------------
 
         latency = (
             time.perf_counter() -
             start
         ) * 1000
 
-
         print(
             "[FAST PLANNER] "
             "type task could not be safely resolved"
         )
 
-
         return {
-
-            "action":
-                "none",
-
-            "x":
-                0,
-
-            "y":
-                0,
-
-            "text":
-                "",
-
-            "amount":
-                0,
-
-            "confidence":
-                0.0,
-
-            "reason":
-                (
-                    "Type task could not be matched to a safe "
-                    "non-sensitive input using the explicit task value."
-                ),
-
-            "vlm_latency_ms":
-                round(
-                    latency,
-                    2
-                )
+            "action": "none",
+            "x": 0,
+            "y": 0,
+            "text": "",
+            "amount": 0,
+            "confidence": 0.0,
+            "reason": (
+                "Type task could not be matched to a safe "
+                "non-sensitive input using the explicit task value."
+            ),
+            "vlm_latency_ms": round(
+                latency,
+                2
+            )
         }
-
 
     # ========================================================
     # CLICK / SUBMIT
     # ========================================================
 
-    target =extract_requested_target(
-            task
-        )
-
+    target = extract_requested_target(task)
 
     if (
         "submit" in t and
         not target
     ):
-
-        target ="submit"
-
+        target = "submit"
 
     click_intent = (
         "click" in t or
@@ -2238,25 +2122,22 @@ def fast_plan(
         "submit" in t
     )
 
-
     if (
         click_intent and
         target
     ):
 
-        element, state =find_target_state(
-                dom_elements,
-                target,
-                detections,
-                require_button=(
-                    target ==
-                    "submit"
-                )
+        element, state = find_target_state(
+            dom_elements,
+            target,
+            detections,
+            require_button=(
+                target == "submit"
             )
-
+        )
 
         # ----------------------------------------------------
-        # TARGET EXISTS BUT IS OFF-SCREEN
+        # Target exists but is off-screen.
         # ----------------------------------------------------
 
         if (
@@ -2271,47 +2152,39 @@ def fast_plan(
                 "outside viewport."
             )
 
-
             return plan_scroll_to_target(
                 element,
                 task,
                 start
             )
 
-
         # ----------------------------------------------------
-        # TARGET VISIBLE
+        # Target visible.
         # ----------------------------------------------------
 
         if element:
 
-            x, y =element_center(
-                    element
-                )
+            x, y = element_center(element)
 
-
-            score =score_element_for_target(
-                    element,
-                    target
-                )
-
+            score = score_element_for_target(
+                element,
+                target
+            )
 
             latency = (
                 time.perf_counter() -
                 start
             ) * 1000
 
-
-            confidence =min(
-                    0.98,
-                    max(
-                        0.70,
-                        0.60 +
-                        score /
-                        100.0
-                    )
+            confidence = min(
+                0.98,
+                max(
+                    0.70,
+                    0.60 +
+                    score /
+                    100.0
                 )
-
+            )
 
             print(
                 "[FAST PLANNER] "
@@ -2320,14 +2193,10 @@ def fast_plan(
                 f"latency={latency:.2f} ms"
             )
 
+            print("[FAST] Action: click")
 
             print(
-                "[FAST] Action: click"
-            )
-
-            print(
-                f"[FAST] Target: "
-                f"({x}, {y})"
+                f"[FAST] Target: ({x}, {y})"
             )
 
             print(
@@ -2335,44 +2204,32 @@ def fast_plan(
                 f"{confidence:.2f}"
             )
 
-
             return {
+                "action": "click",
+                "x": x,
+                "y": y,
 
-                "action":
-                    "click",
+                # Critical:
+                # tells the extension this click is
+                # semantically intended for Submit.
+                "submitIntent": target == "submit",
 
-                "x":
-                    x,
-
-                "y":
-                    y,
-
-                "text":
-                    "",
-
-                "amount":
-                    0,
-
-                "confidence":
-                    round(
-                        confidence,
-                        2
-                    ),
-
-                "reason":
-                    (
-                        f"Matched '{target}' from safe DOM "
-                        "metadata and confirmed the target "
-                        "is in the current viewport."
-                    ),
-
-                "vlm_latency_ms":
-                    round(
-                        latency,
-                        2
-                    )
+                "text": "",
+                "amount": 0,
+                "confidence": round(
+                    confidence,
+                    2
+                ),
+                "reason": (
+                    f"Matched '{target}' from safe DOM "
+                    "metadata and confirmed the target "
+                    "is in the current viewport."
+                ),
+                "vlm_latency_ms": round(
+                    latency,
+                    2
+                )
             }
-
 
     # ========================================================
     # WAIT
@@ -2388,37 +2245,19 @@ def fast_plan(
             start
         ) * 1000
 
-
         return {
-
-            "action":
-                "wait",
-
-            "x":
-                0,
-
-            "y":
-                0,
-
-            "text":
-                "",
-
-            "amount":
-                1000,
-
-            "confidence":
-                0.99,
-
-            "reason":
-                "Explicit wait task.",
-
-            "vlm_latency_ms":
-                round(
-                    latency,
-                    2
-                )
+            "action": "wait",
+            "x": 0,
+            "y": 0,
+            "text": "",
+            "amount": 1000,
+            "confidence": 0.99,
+            "reason": "Explicit wait task.",
+            "vlm_latency_ms": round(
+                latency,
+                2
+            )
         }
-
 
     # ========================================================
     # FALLBACK
@@ -2429,44 +2268,26 @@ def fast_plan(
         start
     ) * 1000
 
-
     print(
         "[FAST PLANNER] "
         "No safe action matched."
     )
 
-
     return {
-
-        "action":
-            "none",
-
-        "x":
-            0,
-
-        "y":
-            0,
-
-        "text":
-            "",
-
-        "amount":
-            0,
-
-        "confidence":
-            0.0,
-
-        "reason":
-            (
-                "No safe action could be resolved from the "
-                "task and safe DOM metadata."
-            ),
-
-        "vlm_latency_ms":
-            round(
-                latency,
-                2
-            )
+        "action": "none",
+        "x": 0,
+        "y": 0,
+        "text": "",
+        "amount": 0,
+        "confidence": 0.0,
+        "reason": (
+            "No safe action could be resolved from the "
+            "task and safe DOM metadata."
+        ),
+        "vlm_latency_ms": round(
+            latency,
+            2
+        )
     }
 
 
@@ -2652,37 +2473,45 @@ def normalize_action(
 
     return {
 
-        "action":
-            action,
+    "action":
+        action,
 
-        "x":
-            x,
+    "x":
+        x,
 
-        "y":
-            y,
+    "y":
+        y,
 
-        "text":
-            str(
-                data.get(
-                    "text",
-                    ""
-                ) or ""
-            ),
-
-        "amount":
-            amount,
-
-        "confidence":
-            confidence,
-
-        "reason":
-            str(
-                data.get(
-                    "reason",
-                    "No reason provided"
-                )
+    "submitIntent":
+        bool(
+            data.get(
+                "submitIntent",
+                False
             )
-    }
+        ),
+
+    "text":
+        str(
+            data.get(
+                "text",
+                ""
+            ) or ""
+        ),
+
+    "amount":
+        amount,
+
+    "confidence":
+        confidence,
+
+    "reason":
+        str(
+            data.get(
+                "reason",
+                "No reason provided"
+            )
+        )
+}
 
 
 # ============================================================

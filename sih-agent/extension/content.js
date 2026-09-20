@@ -22,7 +22,7 @@
 //
 // ============================================================
 
-console.log("🔒 SIH Privacy Agent loaded");
+console.log("SIH Privacy Agent loaded");
 
 
 // ============================================================
@@ -43,7 +43,17 @@ const SIH_CONFIG = {
 
     scrollAmount: 600,
 
-    scrollDuration: 400
+    scrollDuration: 400,
+
+    // Browser-agent safety limits.
+    maxScrollAmount: 1500,
+
+    minWaitMs: 100,
+
+    maxWaitMs: 5000,
+
+    // Maximum coordinate tolerance for browser viewport.
+    coordinateTolerance: 1
 };
 
 
@@ -1328,12 +1338,12 @@ function collectSafeDOM() {
 
 
     console.log(
-        "🧩 Safe DOM elements:",
+        "Safe DOM elements:",
         limited.length
     );
 
     console.log(
-        "👁️ In viewport:",
+        "In viewport:",
         limited.filter(
             element =>
                 element.in_viewport
@@ -1341,7 +1351,7 @@ function collectSafeDOM() {
     );
 
     console.log(
-        "↕️ Off-screen:",
+        "Off-screen:",
         limited.filter(
             element =>
                 !element.in_viewport
@@ -1588,7 +1598,7 @@ function createPrivacyOverlays() {
 
 
     console.log(
-        "🛡️ Privacy overlays created:",
+        "Privacy overlays created:",
         privacyOverlays.length
     );
 }
@@ -1662,7 +1672,7 @@ function runPrivacyEngine() {
     } catch (error) {
 
         console.error(
-            "❌ Privacy engine error:",
+            "Privacy engine error:",
             error
         );
 
@@ -1995,7 +2005,1166 @@ function isPointInViewport(
     );
 }
 
+// ============================================================
+// BROWSER AGENT SAFETY GATE
+// ============================================================
+//
+// Every browser action must pass local validation before it
+// reaches the actual DOM executor.
+//
+// The planner is NOT trusted to directly control the browser.
+//
+// Safety checks performed here include:
+// - supported action type
+// - valid coordinates
+// - viewport bounds
+// - visible target
+// - interactable target
+// - disabled / readonly protection
+// - password / OTP / credential protection
+// - submit-target validation
+// - bounded scroll
+// - bounded wait
+//
+// IMPORTANT:
+// These checks happen locally inside the browser.
+// No sensitive field value is read.
+// ============================================================
 
+const ALLOWED_BROWSER_ACTIONS = new Set([
+    "click",
+    "type",
+    "scroll",
+    "wait",
+    "none"
+]);
+
+
+const SENSITIVE_TARGET_PATTERN =
+    /\b(?:password|passwd|passcode|credential|credentials|secret|otp|one[-\s]?time[-\s]?password|one[-\s]?time[-\s]?code|security[-\s]?code|verification[-\s]?code|auth[-\s]?code|pin)\b/i;
+
+
+// ============================================================
+// SAFE METADATA EXTRACTION
+// ============================================================
+
+function getElementSafetyMetadata(element) {
+
+    if (!element) {
+        return {
+            tag: "",
+            type: "",
+            role: "",
+            name: "",
+            id: "",
+            placeholder: "",
+            ariaLabel: "",
+            autocomplete: ""
+        };
+    }
+
+
+    return {
+
+        tag:
+            String(
+                element.tagName || ""
+            ).toLowerCase(),
+
+        type:
+            String(
+                element.getAttribute("type") || ""
+            ).toLowerCase(),
+
+        role:
+            String(
+                element.getAttribute("role") || ""
+            ).toLowerCase(),
+
+        name:
+            String(
+                element.getAttribute("name") || ""
+            ).toLowerCase(),
+
+        id:
+            String(
+                element.getAttribute("id") || ""
+            ).toLowerCase(),
+
+        placeholder:
+            String(
+                element.getAttribute("placeholder") || ""
+            ).toLowerCase(),
+
+        ariaLabel:
+            String(
+                element.getAttribute("aria-label") || ""
+            ).toLowerCase(),
+
+        autocomplete:
+            String(
+                element.getAttribute("autocomplete") || ""
+            ).toLowerCase()
+    };
+}
+
+
+// ============================================================
+// SENSITIVE TARGET CHECK
+// ============================================================
+//
+// This function NEVER reads element.value.
+//
+// Only HTML metadata is inspected.
+// ============================================================
+
+function isSensitiveTarget(element) {
+
+    if (!element) {
+        return true;
+    }
+
+
+    const metadata =
+        getElementSafetyMetadata(
+            element
+        );
+
+     if (
+        metadata.tag === "button" ||
+        (
+            metadata.tag === "input" &&
+            metadata.type === "submit"
+        ) ||
+        metadata.role === "button"
+    ) {
+        return false;
+    }
+    // Native password field.
+    if (
+        metadata.type === "password"
+    ) {
+        return true;
+    }
+
+
+    // Sensitive autocomplete tokens.
+    if (
+        metadata.autocomplete === "one-time-code" ||
+        metadata.autocomplete === "cc-csc" ||
+        metadata.autocomplete === "cc-cvc"
+    ) {
+        return true;
+    }
+
+
+    const combined =
+        [
+            metadata.type,
+            metadata.name,
+            metadata.id,
+            metadata.placeholder,
+            metadata.ariaLabel,
+            metadata.autocomplete
+        ]
+            .join(" ")
+            .trim();
+
+
+    return SENSITIVE_TARGET_PATTERN.test(
+        combined
+    );
+}
+
+
+// ============================================================
+// VISIBLE TARGET CHECK
+// ============================================================
+
+function isInteractableElement(element) {
+
+    if (!element) {
+        return false;
+    }
+
+
+    if (!isVisible(element)) {
+        return false;
+    }
+
+
+    if (
+        element.disabled === true
+    ) {
+        return false;
+    }
+
+
+    if (
+        element.hasAttribute &&
+        element.hasAttribute("aria-disabled") &&
+        String(
+            element.getAttribute(
+                "aria-disabled"
+            )
+        ).toLowerCase() === "true"
+    ) {
+        return false;
+    }
+
+
+    const style =
+        window.getComputedStyle(
+            element
+        );
+
+
+    if (
+        style.pointerEvents === "none"
+    ) {
+        return false;
+    }
+
+
+    return true;
+}
+
+
+// ============================================================
+// CLICKABLE TARGET CHECK
+// ============================================================
+
+function isClickableElement(element) {
+
+    if (!element) {
+        return false;
+    }
+
+    const tag =
+        String(
+            element.tagName || ""
+        ).toLowerCase();
+
+    const type =
+        String(
+            element.getAttribute?.("type") || ""
+        ).toLowerCase();
+
+    const role =
+        String(
+            element.getAttribute?.("role") || ""
+        ).toLowerCase();
+
+    // Standard clickable HTML controls.
+    if (
+        tag === "button" ||
+        tag === "a" ||
+        tag === "select"
+    ) {
+        return true;
+    }
+
+    // Textarea is not a click action target for the agent.
+    if (
+        tag === "textarea"
+    ) {
+        return false;
+    }
+
+    // Only explicitly clickable input types.
+    if (
+        tag === "input"
+    ) {
+
+        return (
+            type === "button" ||
+            type === "submit" ||
+            type === "reset" ||
+            type === "checkbox" ||
+            type === "radio" ||
+            type === "file" ||
+            type === "image"
+        );
+    }
+
+    // ARIA controls.
+    if (
+        role === "button" ||
+        role === "link" ||
+        role === "menuitem" ||
+        role === "tab"
+    ) {
+        return true;
+    }
+
+    // Elements with an explicit click handler.
+    if (
+        typeof element.onclick === "function"
+    ) {
+        return true;
+    }
+
+    return false;
+}
+
+
+// ============================================================
+// SUBMIT TARGET CHECK
+// ============================================================
+//
+// Used when the agent is explicitly performing a submit flow.
+//
+// We inspect metadata and visible UI text only.
+// We NEVER inspect input.value.
+// ============================================================
+
+// ============================================================
+// SUBMIT TARGET CHECK
+// ============================================================
+//
+// Used when the agent is explicitly performing a submit flow.
+//
+// We inspect only safe UI metadata / visible button text.
+// We NEVER inspect input.value.
+// ============================================================
+
+function isSubmitElement(element) {
+
+    if (!element) {
+        return false;
+    }
+
+    const tag =
+        String(
+            element.tagName || ""
+        ).toLowerCase();
+
+    const type =
+        String(
+            element.getAttribute?.("type") || ""
+        ).toLowerCase();
+
+    const role =
+        String(
+            element.getAttribute?.("role") || ""
+        ).toLowerCase();
+
+    const text =
+        normalizeText(
+            element.innerText ||
+            element.textContent ||
+            element.getAttribute?.("aria-label") ||
+            ""
+        ).toLowerCase();
+
+    // --------------------------------------------------------
+    // Native input submit
+    // --------------------------------------------------------
+
+    if (
+        tag === "input" &&
+        type === "submit"
+    ) {
+        return true;
+    }
+
+    // --------------------------------------------------------
+    // Button elements
+    //
+    // Accept:
+    //   <button>
+    //   <button type="submit">
+    //   <button type="button">
+    //
+    // BUT ONLY when the visible label explicitly indicates
+    // a submit/continue/apply/finish/confirm action.
+    // --------------------------------------------------------
+
+    if (tag === "button") {
+
+        const hasSubmitLabel =
+            /\bsubmit\b|\bapply\b|\bcontinue\b|\bfinish\b|\bconfirm\b/.test(
+                text
+            );
+
+        if (
+            hasSubmitLabel &&
+            (
+                type === "" ||
+                type === "submit" ||
+                type === "button"
+            )
+        ) {
+            return true;
+        }
+    }
+
+    // --------------------------------------------------------
+    // ARIA buttons
+    // --------------------------------------------------------
+
+    if (
+        role === "button"
+    ) {
+
+        const hasSubmitLabel =
+            /\bsubmit\b|\bapply\b|\bcontinue\b|\bfinish\b|\bconfirm\b/.test(
+                text
+            );
+
+        if (hasSubmitLabel) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+// ============================================================
+// ACTION TYPE VALIDATION
+// ============================================================
+
+function validateActionType(
+    actionType
+) {
+
+    const normalized =
+        String(
+            actionType || ""
+        )
+            .toLowerCase()
+            .trim();
+
+
+    if (
+        !ALLOWED_BROWSER_ACTIONS.has(
+            normalized
+        )
+    ) {
+
+        return {
+
+            valid: false,
+
+            error:
+                `Unsupported browser action: ${
+                    normalized || "missing"
+                }`
+        };
+    }
+
+
+    return {
+
+        valid: true,
+
+        action:
+            normalized
+    };
+}
+
+
+// ============================================================
+// COORDINATE VALIDATION
+// ============================================================
+
+function validateActionCoordinates(
+    target
+) {
+
+    if (
+        !target ||
+        target.x === undefined ||
+        target.y === undefined
+    ) {
+
+        return {
+
+            valid: false,
+
+            error:
+                "Action target coordinates are missing"
+        };
+    }
+
+
+    const x =
+        Number(target.x);
+
+    const y =
+        Number(target.y);
+
+
+    if (
+        !Number.isFinite(x) ||
+        !Number.isFinite(y)
+    ) {
+
+        return {
+
+            valid: false,
+
+            error:
+                "Action target coordinates are invalid"
+        };
+    }
+
+
+    if (
+        !isPointInViewport(
+            x,
+            y
+        )
+    ) {
+
+        return {
+
+            valid: false,
+
+            requiresScroll: true,
+
+            error:
+                "Action target is outside the current viewport",
+
+            x,
+            y
+        };
+    }
+
+
+    return {
+
+        valid: true,
+
+        x,
+        y
+    };
+}
+
+
+// ============================================================
+// CLICK TARGET VALIDATION
+// ============================================================
+
+function validateClickTarget(action) {
+    if (!action || typeof action !== "object") {
+        return {
+            valid: false,
+            reason: "Invalid action object."
+        };
+    }
+
+    if (action.type !== "click") {
+        return {
+            valid: false,
+            reason: "Action is not a click."
+        };
+    }
+
+    const x = Number(action.x);
+    const y = Number(action.y);
+
+    if (!Number.isFinite(x) || !Number.isFinite(y)) {
+        return {
+            valid: false,
+            reason: "Click coordinates are invalid."
+        };
+    }
+
+    if (x < 0 || y < 0) {
+        return {
+            valid: false,
+            reason: "Click coordinates cannot be negative."
+        };
+    }
+
+    const target = document.elementFromPoint(x, y);
+
+    if (!target) {
+        return {
+    valid: false,
+    retryable: true,
+    reason:
+        "No DOM element exists at the requested coordinates."
+};
+    }
+
+    const clickable = target.closest(
+        'button, a, input, select, textarea, [role="button"], [role="link"], [onclick]'
+    );
+
+    if (!clickable) {
+        return {
+    valid: false,
+    retryable: true,
+    reason:
+        "Target is not a clickable element."
+};
+    }
+
+    /*
+     * HARD PRIVACY / SAFETY BLOCK
+     *
+     * Never allow the agent to click password,
+     * OTP, credential, PIN, or security-code fields.
+     */
+    if (isSensitiveTarget(clickable)) {
+        return {
+            valid: false,
+            reason: "Click blocked because target is a sensitive security field."
+        };
+    }
+
+    /*
+     * SUBMIT SAFETY GATE
+     *
+     * The planner may provide submitIntent=true when
+     * the current task explicitly requires submitting.
+     *
+     * If submitIntent is true, ONLY an actual submit
+     * control is allowed.
+     */
+    if (action.submitIntent === true) {
+        if (!isSubmitElement(clickable)) {
+            return {
+    valid: false,
+    retryable: true,
+    reason:
+        "Submit action blocked because target is not a submit control."
+};
+        }
+    }
+
+    /*
+     * Optional target metadata validation.
+     *
+     * This prevents a planner from selecting a sensitive
+     * field even when coordinates happen to point there.
+     */
+    const metadata = {
+        tagName: String(clickable.tagName || "").toLowerCase(),
+        type: String(clickable.getAttribute?.("type") || "").toLowerCase(),
+        name: String(clickable.getAttribute?.("name") || "").toLowerCase(),
+        id: String(clickable.id || "").toLowerCase(),
+        ariaLabel: String(
+            clickable.getAttribute?.("aria-label") || ""
+        ).toLowerCase()
+    };
+
+    const sensitivePattern =
+        /\b(password|passwd|passcode|credential|credentials|otp|one[-\s]?time[-\s]?password|security[-\s]?code|pin|secret)\b/i;
+
+    const metadataText = [
+        metadata.tagName,
+        metadata.type,
+        metadata.name,
+        metadata.id,
+        metadata.ariaLabel
+    ].join(" ");
+
+    if (sensitivePattern.test(metadataText)) {
+        return {
+            valid: false,
+            reason: "Click blocked because target metadata indicates a sensitive field."
+        };
+    }
+
+    return {
+        valid: true,
+        element: clickable,
+        x,
+        y
+    };
+}
+
+
+// ============================================================
+// TYPE TARGET VALIDATION
+// ============================================================
+
+function validateTypeTarget(
+    target,
+    value
+) {
+
+    if (
+        value === null ||
+        value === undefined ||
+        String(value).length === 0
+    ) {
+
+        return {
+
+            valid: false,
+
+            unsafe: true,
+
+            error:
+                "Typing requires an explicit non-empty value"
+        };
+    }
+
+
+    const coordinates =
+        validateActionCoordinates(
+            target
+        );
+
+
+    if (
+        !coordinates.valid
+    ) {
+        return coordinates;
+    }
+
+
+    const element =
+        document.elementFromPoint(
+            coordinates.x,
+            coordinates.y
+        );
+
+
+    if (!element) {
+
+        return {
+
+            valid: false,
+
+            retryable: true,
+
+            error:
+                "No DOM element exists at the requested typing coordinates"
+        };
+    }
+
+
+    const input =
+        element.closest?.(
+            "input, textarea"
+        );
+
+
+    if (!input) {
+
+        return {
+
+            valid: false,
+
+            retryable: true,
+
+            error:
+                "Typing target is not an input or textarea"
+        };
+    }
+
+
+    if (
+        !isInteractableElement(
+            input
+        )
+    ) {
+
+        return {
+
+            valid: false,
+
+            retryable: true,
+
+            error:
+                "Typing target is not visible or interactable"
+        };
+    }
+
+
+    if (
+        isSensitiveTarget(
+            input
+        )
+    ) {
+
+        return {
+    valid: false,
+    unsafe: true,
+    error:
+        "Typing blocked on password, OTP, credential or security field"
+};
+    }
+
+
+    if (
+        input.readOnly === true
+    ) {
+
+        return {
+
+            valid: false,
+
+            unsafe: true,
+
+            error:
+                "Typing blocked on read-only field"
+        };
+    }
+
+
+    if (
+        input.disabled === true
+    ) {
+
+        return {
+
+            valid: false,
+
+            unsafe: true,
+
+            error:
+                "Typing blocked on disabled field"
+        };
+    }
+
+
+    return {
+
+        valid: true,
+
+        element:
+            input
+    };
+}
+
+
+// ============================================================
+// SCROLL VALIDATION
+// ============================================================
+
+function validateScrollAmount(
+    value
+) {
+
+    const amount =
+        Number(value);
+
+
+    if (
+        !Number.isFinite(
+            amount
+        )
+    ) {
+
+        return {
+
+            valid: false,
+
+            error:
+                "Scroll amount is invalid"
+        };
+    }
+
+
+    if (
+        amount === 0
+    ) {
+
+        return {
+
+            valid: false,
+
+            error:
+                "Scroll amount cannot be zero"
+        };
+    }
+
+
+    const boundedAmount =
+        Math.max(
+            -SIH_CONFIG.maxScrollAmount,
+            Math.min(
+                SIH_CONFIG.maxScrollAmount,
+                amount
+            )
+        );
+
+
+    return {
+
+        valid: true,
+
+        amount:
+            boundedAmount
+    };
+}
+
+
+// ============================================================
+// WAIT VALIDATION
+// ============================================================
+
+function validateWaitDuration(
+    value
+) {
+
+    const milliseconds =
+        Number(value);
+
+
+    if (
+        !Number.isFinite(
+            milliseconds
+        )
+    ) {
+
+        return {
+
+            valid: false,
+
+            error:
+                "Wait duration is invalid"
+        };
+    }
+
+
+    const boundedDuration =
+        Math.max(
+            SIH_CONFIG.minWaitMs,
+            Math.min(
+                SIH_CONFIG.maxWaitMs,
+                milliseconds
+            )
+        );
+
+
+    return {
+
+        valid: true,
+
+        milliseconds:
+            boundedDuration
+    };
+}
+
+
+// ============================================================
+// COMPLETE ACTION SAFETY VALIDATOR
+// ============================================================
+//
+// This is the single local gate for browser actions.
+//
+// ============================================================
+
+function validateBrowserAction(
+    action
+) {
+
+    if (
+        !action ||
+        typeof action !== "object"
+    ) {
+
+        return {
+
+            valid: false,
+
+            unsafe: true,
+
+            error:
+                "Browser action is missing or malformed"
+        };
+    }
+
+
+    const actionType =
+        String(
+            action.action ||
+            action.type ||
+            ""
+        )
+            .toLowerCase()
+            .trim();
+
+
+    const typeValidation =
+        validateActionType(
+            actionType
+        );
+
+
+    if (
+        !typeValidation.valid
+    ) {
+
+        return typeValidation;
+    }
+
+
+    // --------------------------------------------------------
+    // NONE
+    // --------------------------------------------------------
+
+    if (
+        actionType === "none"
+    ) {
+
+        return {
+
+            valid: true,
+
+            action:
+                "none"
+        };
+    }
+
+
+        // --------------------------------------------------------
+    // CLICK
+    // --------------------------------------------------------
+
+    if (
+    actionType === "click"
+) {
+
+    const submitIntent =
+        action?.submitIntent === true ||
+        action?.target?.submitIntent === true;
+
+    // --------------------------------------------------------
+    // SUBMIT INTENT
+    // --------------------------------------------------------
+    //
+    // For Submit actions, the AI coordinates are NOT trusted
+    // as the actual click target.
+    //
+    // executeClick() will resolve the real Submit control
+    // locally using DOM semantics and safety checks.
+    //
+    // Therefore we must NOT run validateClickTarget()
+    // against the AI coordinates here.
+    // --------------------------------------------------------
+
+    if (submitIntent) {
+
+        return {
+            valid: true,
+            action: "click",
+            submitIntent: true
+        };
+    }
+
+    // --------------------------------------------------------
+    // NORMAL CLICK
+    // --------------------------------------------------------
+
+    const target = {
+        x:
+            action?.target?.x !== undefined
+                ? action.target.x
+                : action?.x,
+
+        y:
+            action?.target?.y !== undefined
+                ? action.target.y
+                : action?.y,
+
+        submitIntent: false
+    };
+
+    return {
+        action: "click",
+
+        ...validateClickTarget(
+            target
+        )
+    };
+
+    }
+    // --------------------------------------------------------
+    // TYPE
+    // --------------------------------------------------------
+
+    if (
+        actionType === "type"
+    ) {
+
+        const target =
+            action.target ||
+            {
+                x: action.x,
+                y: action.y
+            };
+
+
+        const value =
+            action.value !== undefined
+                ? action.value
+                : action.text;
+
+
+        return {
+            action: "type",
+            ...validateTypeTarget(
+                target,
+                value
+            )
+        };
+    }
+
+
+    // --------------------------------------------------------
+    // SCROLL
+    // --------------------------------------------------------
+
+    if (
+        actionType === "scroll"
+    ) {
+
+        const amount =
+            action.amount !== undefined
+                ? action.amount
+                : action.value;
+
+
+        return {
+            action: "scroll",
+            ...validateScrollAmount(
+                amount
+            )
+        };
+    }
+
+
+    // --------------------------------------------------------
+    // WAIT
+    // --------------------------------------------------------
+
+    if (
+        actionType === "wait"
+    ) {
+
+        const duration =
+            action.amount !== undefined
+                ? action.amount
+                : action.value;
+
+
+        return {
+            action: "wait",
+            ...validateWaitDuration(
+                duration
+            )
+        };
+    }
+
+
+    return {
+
+        valid: false,
+
+        unsafe: true,
+
+        error:
+            "Browser action failed safety validation"
+    };
+}
 // ============================================================
 // SCROLL TO ELEMENT
 // ============================================================
@@ -2053,194 +3222,229 @@ function scrollElementIntoView(
 }
 
 
+
+
 // ============================================================
 // EXECUTE CLICK
 // ============================================================
 
-function executeClick(
-    target
-) {
+function executeClick(action) {
+    console.log("[ACTION] Click request received.");
 
-    if (
-        !target ||
-        target.x == null ||
-        target.y == null
-    ) {
+    const submitIntent =
+        action?.submitIntent === true ||
+        action?.target?.submitIntent === true;
 
-        return {
+    // =========================================================
+    // SUBMIT INTENT
+    // =========================================================
+    //
+    // For Submit, do not blindly trust an AI-generated
+    // coordinate. Resolve the actual Submit control locally.
+    //
+    // This keeps the final click decision inside the browser.
+    // =========================================================
 
-            success: false,
+    if (submitIntent) {
+        console.log(
+            "[SAFETY] Submit intent detected. Resolving Submit button locally."
+        );
 
-            error:
-                "Click target coordinates missing"
-        };
-    }
+        const submitCandidates = Array.from(
+    document.querySelectorAll(
+        [
+            'button',
+            'input[type="submit"]',
+            '[role="button"]'
+        ].join(",")
+    )
+);
 
+        let submitButton = null;
 
-    const x =
-        Number(target.x);
+        for (const candidate of submitCandidates) {
+            try {
+                if (!candidate) {
+                    continue;
+                }
 
-    const y =
-        Number(target.y);
+                if (!isSubmitElement(candidate)) {
+                    continue;
+                }
+                console.log(
+    "[SAFETY] Submit candidate identified:",
+    candidate.tagName
+);
+                if (!isInteractableElement(candidate)) {
+                    continue;
+                }
 
+                if (isSensitiveTarget(candidate)) {
+                    console.warn(
+                        "[SAFETY] Submit candidate rejected as sensitive."
+                    );
+                    continue;
+                }
 
-    if (
-        !Number.isFinite(x) ||
-        !Number.isFinite(y)
-    ) {
-
-        return {
-
-            success: false,
-
-            error:
-                "Invalid click coordinates"
-        };
-    }
-
-
-    /*
-     * IMPORTANT:
-     *
-     * If the planner tries to click outside the current
-     * viewport, do NOT fabricate a click.
-     *
-     * The correct action is to ask the planner to scroll.
-     *
-     * popup.js will then capture the new viewport, sanitize it,
-     * and ask the planner again.
-     */
-
-    if (
-        !isPointInViewport(
-            x,
-            y
-        )
-    ) {
-
-        console.warn(
-            "↕️ Click target is outside current viewport:",
-            {
-                x,
-                y,
-                viewportWidth:
-                    window.innerWidth,
-                viewportHeight:
-                    window.innerHeight
+                submitButton = candidate;
+                break;
+            } catch (error) {
+                console.warn(
+                    "[SAFETY] Submit candidate check failed."
+                );
             }
+        }
+
+        if (!submitButton) {
+            console.warn(
+                "[SAFETY] No safe Submit control found."
+            );
+
+            return {
+                success: false,
+                action: "click",
+                error:
+                    "Browser action rejected by local safety policy: no safe Submit control found."
+            };
+        }
+
+        // Make sure the real Submit control is visible.
+        try {
+            submitButton.scrollIntoView({
+                behavior: "auto",
+                block: "center",
+                inline: "center"
+            });
+        } catch (_) {
+            // Ignore scroll failure; final interactability
+            // check below still applies.
+        }
+
+        // Re-check after scrolling.
+        if (!isInteractableElement(submitButton)) {
+            console.warn(
+                "[SAFETY] Submit control is not interactable."
+            );
+
+            return {
+                success: false,
+                action: "click",
+                error:
+                    "Browser action rejected by local safety policy: Submit control is not interactable."
+            };
+        }
+
+        if (isSensitiveTarget(submitButton)) {
+            console.warn(
+                "[SAFETY] Submit control failed final sensitivity check."
+            );
+
+            return {
+                success: false,
+                action: "click",
+                error:
+                    "Browser action rejected by local safety policy: Submit control failed final safety validation."
+            };
+        }
+
+        console.log(
+            "[SAFETY] Safe Submit control resolved locally."
         );
 
+        try {
+            submitButton.click();
 
-        return {
+            console.log(
+                "[ACTION] Submit click executed successfully."
+            );
 
-            success: false,
+            return {
+                success: true,
+                action: "click",
+                element: submitButton.tagName
+            };
+        } catch (error) {
+            console.error(
+                "[ACTION] Submit click failed."
+            );
 
-            action:
-                "scroll_required",
-
-            error:
-                "Click target is outside the current viewport",
-
-            x,
-
-            y
-        };
+            return {
+                success: false,
+                action: "click",
+                error:
+                    "Submit click execution failed."
+            };
+        }
     }
 
+    // =========================================================
+    // NORMAL CLICK
+    // =========================================================
 
-    /*
-     * Privacy protection:
-     *
-     * Never click directly inside a protected PII detection.
-     */
+    const validation = validateBrowserAction(action);
 
-    if (
-        isPointInsideDetection(
-            x,
-            y
-        )
-    ) {
-
-        return {
-
-            success: false,
-
-            error:
-                "Click blocked because target overlaps a privacy-protected region"
-        };
-    }
-
-
-    console.log(
-        "🎯 Click target:",
-        x,
-        y
-    );
-
-
-    const element =
-        document.elementFromPoint(
-            x,
-            y
+    if (!validation.valid) {
+        console.warn(
+            "[SAFETY] Click rejected by local validation."
         );
 
-
-    if (!element) {
-
         return {
-
             success: false,
-
+            action: "click",
             error:
-                "No element found at click coordinates"
+                validation.error ||
+                "Browser action rejected by local safety policy."
         };
     }
-
 
     const clickable =
-        element.closest(
-            "button, input, textarea, select, a, [role='button'], [role='link']"
-        ) || element;
+        validation.element;
 
-
-    if (
-        clickable.matches &&
-        clickable.matches(
-            "input[type='password']"
-        )
-    ) {
-
+    if (!clickable) {
         return {
-
             success: false,
-
+            action: "click",
             error:
-                "Click blocked on password field"
+                "No safe clickable element found."
         };
     }
 
+    // Final local safety check.
+    if (!isInteractableElement(clickable)) {
+        return {
+            success: false,
+            action: "click",
+            error:
+                "Browser action rejected: target is not interactable."
+        };
+    }
 
-    clickable.click();
+    if (isSensitiveTarget(clickable)) {
+        return {
+            success: false,
+            action: "click",
+            error:
+                "Browser action rejected: target is sensitive."
+        };
+    }
 
+    try {
+        clickable.click();
 
-    console.log(
-        "🖱️ Click executed"
-    );
-
-
-    return {
-
-    success: true,
-
-    action:
-        "click",
-
-    element:
-        clickable.tagName
-};
+        return {
+            success: true,
+            action: "click",
+            element: clickable.tagName
+        };
+    } catch (error) {
+        return {
+            success: false,
+            action: "click",
+            error:
+                "Click execution failed."
+        };
+    }
 }
-
-
 // ============================================================
 // EXECUTE TYPE
 // ============================================================
@@ -2478,14 +3682,23 @@ function executeType(
 
 
     const isOTPField =
-        metadata.includes(
-            "otp"
-        ) ||
-        metadata.includes(
-            "one-time-code"
-        ) ||
-        autocomplete ===
-            "one-time-code";
+    metadata.includes(
+        "otp"
+    ) ||
+    metadata.includes(
+        "one-time-code"
+    ) ||
+    metadata.includes(
+        "one time code"
+    ) ||
+    metadata.includes(
+        "one-time-password"
+    ) ||
+    metadata.includes(
+        "verification code"
+    ) ||
+    autocomplete ===
+        "one-time-code";
 
 
     if (
@@ -2495,7 +3708,7 @@ function executeType(
     ) {
 
         console.warn(
-            "🔒 Typing blocked on protected credential field"
+            "Typing blocked on protected credential field"
         );
 
         return {
@@ -2623,7 +3836,7 @@ function executeType(
     // ========================================================
 
     console.log(
-        "✅ Safe local value entered"
+        "Safe local value entered"
     );
 
 
@@ -2659,41 +3872,45 @@ function executeType(
 //
 // ============================================================
 
+// ============================================================
+// EXECUTE SCROLL
+// ============================================================
+
 function executeScroll(
     value
 ) {
 
-    let amount =
-        Number(value);
-
-
-    if (
-        !Number.isFinite(amount)
-    ) {
-
-        amount =
-            SIH_CONFIG.scrollAmount;
-    }
-
-
-    amount =
-        Math.max(
-            -1500,
-            Math.min(
-                1500,
-                amount
-            )
+    const validation =
+        validateScrollAmount(
+            value
         );
 
 
-    console.log(
-        "↕️ Scrolling:",
-        amount
-    );
+    if (
+        !validation.valid
+    ) {
+
+        return {
+
+            success: false,
+
+            action:
+                "scroll_blocked",
+
+            error:
+                validation.error
+        };
+    }
 
 
-    window.scrollBy(
-        {
+    const amount =
+        validation.amount;
+
+
+    try {
+
+        window.scrollBy({
+
             top:
                 amount,
 
@@ -2702,8 +3919,23 @@ function executeScroll(
 
             behavior:
                 "smooth"
-        }
-    );
+        });
+
+    } catch (error) {
+
+        return {
+
+            success: false,
+
+            action:
+                "scroll",
+
+            retryable: true,
+
+            error:
+                "Scroll execution failed"
+        };
+    }
 
 
     return {
@@ -2726,29 +3958,27 @@ function executeWait(
     value
 ) {
 
-    let milliseconds =
-        Number(value);
+    const validation =
+        validateWaitDuration(
+            value
+        );
 
 
     if (
-        !Number.isFinite(
-            milliseconds
-        )
+        !validation.valid
     ) {
 
-        milliseconds =
-            1000;
+        return {
+
+            success: false,
+
+            action:
+                "wait_blocked",
+
+            error:
+                validation.error
+        };
     }
-
-
-    milliseconds =
-        Math.max(
-            100,
-            Math.min(
-                5000,
-                milliseconds
-            )
-        );
 
 
     return {
@@ -2759,100 +3989,175 @@ function executeWait(
             "wait",
 
         delay:
-            milliseconds
+            validation.milliseconds
     };
 }
 
+// ============================================================
+// EXECUTE BROWSER ACTION
+// ============================================================
 
 // ============================================================
 // EXECUTE BROWSER ACTION
+// ============================================================
+
+// ============================================================
+// EXECUTE BROWSER ACTION
+// ============================================================
+//
+// The planner is untrusted.
+//
+// Every action passes through:
+//     1. Local safety validation
+//     2. Action-specific executor
+//     3. Executor-level validation
+//
+// Fail closed on anything unexpected.
 // ============================================================
 
 function executeBrowserAction(
     action
 ) {
 
-    if (!action) {
+    // --------------------------------------------------------
+    // GLOBAL ACTION SAFETY GATE
+    // --------------------------------------------------------
+
+    const validation =
+        validateBrowserAction(
+            action
+        );
+
+    if (
+        !validation.valid
+    ) {
+
+        console.warn(
+            "[SAFETY] Browser action blocked:",
+            validation.error
+        );
+
+        if (
+            validation.requiresScroll
+        ) {
+
+            return {
+                success: false,
+
+                action:
+                    "scroll_required",
+
+                error:
+                    validation.error,
+
+                x:
+                    validation.x,
+
+                y:
+                    validation.y,
+
+                retryable:
+                    true
+            };
+        }
 
         return {
+    success: false,
 
-            success: false,
+    action:
+        validation.action ||
+        "action_blocked",
 
-            error:
-                "No action received"
-        };
+    retryable:
+        validation.retryable === true,
+
+    unsafe:
+        validation.unsafe === true,
+
+    error:
+        validation.error ||
+        "Browser action rejected by local safety policy"
+};
     }
 
 
-    /*
-     * Backend action schema:
-     *
-     * {
-     *     action,
-     *     x,
-     *     y,
-     *     text,
-     *     amount,
-     *     confidence,
-     *     reason
-     * }
-     *
-     * Legacy extension schema:
-     *
-     * {
-     *     type,
-     *     target: { x, y },
-     *     value
-     * }
-     *
-     * Accept both.
-     */
+    // --------------------------------------------------------
+    // NORMALIZED ACTION TYPE
+    // --------------------------------------------------------
 
     const actionType =
-        action.action ||
-        action.type;
+        validation.action;
 
 
-    const target =
-        action.target ||
-        {
-            x:
-                action.x,
-
-            y:
-                action.y
-        };
-
-
-    const value =
-        action.value !== undefined
-            ? action.value
-            : action.text;
-
-
-    // ========================================================
-    // CLICK
-    // ========================================================
+    // --------------------------------------------------------
+    // NONE
+    // --------------------------------------------------------
 
     if (
-        actionType ===
-        "click"
+        actionType === "none"
     ) {
 
-        return executeClick(
-            target
-        );
+        return {
+            success: true,
+
+            action:
+                "none"
+        };
     }
 
 
-    // ========================================================
-    // TYPE
-    // ========================================================
+    // --------------------------------------------------------
+    // CLICK
+    // --------------------------------------------------------
 
     if (
-        actionType ===
-        "type"
+        actionType === "click"
     ) {
+
+        const target = {
+    x:
+        action?.target?.x !== undefined
+            ? action.target.x
+            : action?.x,
+
+    y:
+        action?.target?.y !== undefined
+            ? action.target.y
+            : action?.y,
+
+    submitIntent:
+        action?.submitIntent === true ||
+        action?.target?.submitIntent === true
+};
+
+return executeClick(
+    target
+);
+    }
+
+
+    // --------------------------------------------------------
+    // TYPE
+    // --------------------------------------------------------
+
+    if (
+        actionType === "type"
+    ) {
+
+        const target =
+            action?.target ||
+            {
+                x:
+                    action?.x,
+
+                y:
+                    action?.y
+            };
+
+        const value =
+            action?.value !== undefined
+                ? action.value
+                : action?.text;
 
         return executeType(
             target,
@@ -2861,76 +4166,60 @@ function executeBrowserAction(
     }
 
 
-    // ========================================================
+    // --------------------------------------------------------
     // SCROLL
-    // ========================================================
+    // --------------------------------------------------------
 
     if (
-        actionType ===
-        "scroll"
+        actionType === "scroll"
     ) {
+
+        const amount =
+            action?.amount !== undefined
+                ? action.amount
+                : action?.value;
 
         return executeScroll(
-            action.amount !== undefined
-                ? action.amount
-                : value
+            amount
         );
     }
 
 
-    // ========================================================
+    // --------------------------------------------------------
     // WAIT
-    // ========================================================
+    // --------------------------------------------------------
 
     if (
-        actionType ===
-        "wait"
+        actionType === "wait"
     ) {
+
+        const duration =
+            action?.amount !== undefined
+                ? action.amount
+                : action?.value;
 
         return executeWait(
-            action.amount !== undefined
-                ? action.amount
-                : value
+            duration
         );
     }
 
 
-    // ========================================================
-    // NONE
-    // ========================================================
-
-    if (
-        actionType ===
-        "none"
-    ) {
-
-        return {
-
-            success: true,
-
-            action:
-                "none",
-
-            message:
-                "No browser action required"
-        };
-    }
-
-
-    // ========================================================
-    // UNKNOWN
-    // ========================================================
+    // --------------------------------------------------------
+    // FAIL CLOSED
+    // --------------------------------------------------------
 
     return {
-
         success: false,
 
+        action:
+            "action_blocked",
+
+        unsafe: true,
+
         error:
-            `Unsupported action type: ${actionType}`
+            "Browser action failed closed"
     };
 }
-
-
 // ============================================================
 // MESSAGE HANDLER
 // ============================================================
@@ -3525,15 +4814,15 @@ function initializePrivacyAgent() {
 
 
     console.log(
-        "🛡️ SIH Privacy Engine initialized"
+        "SIH Privacy Engine initialized"
     );
 
     console.log(
-        "👁️ Screenshot-only PII masking active"
+        "Screenshot-only PII masking active"
     );
 
     console.log(
-        "↕️ Off-screen DOM perception enabled"
+        "Off-screen DOM perception enabled"
     );
 }
 
