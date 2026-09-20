@@ -32,7 +32,7 @@
 // ============================================================
 
 console.log(
-    "🟢 SIH Privacy Agent popup loaded"
+    " SIH Privacy Agent popup loaded"
 );
 
 
@@ -69,7 +69,7 @@ const taskInput =
 if (!captureButton) {
 
     console.error(
-        "❌ Capture button not found."
+        " Capture button not found."
     );
 }
 
@@ -77,7 +77,7 @@ if (!captureButton) {
 if (!taskInput) {
 
     console.error(
-        "❌ Task input not found."
+        " Task input not found."
     );
 }
 
@@ -195,7 +195,7 @@ function setLoading(
 
         captureButton.innerHTML =
             `
-                🛡️ Execute Private Agent
+                 Execute Private Agent
             `;
     }
 }
@@ -347,7 +347,7 @@ function validateCompoundTask(
 async function captureSanitizedScreen() {
 
     console.log(
-        "📸 Requesting local capture + sanitization..."
+        " Requesting local capture + sanitization..."
     );
 
 
@@ -360,9 +360,18 @@ async function captureSanitizedScreen() {
 
 
     console.log(
-        "📨 Capture response:",
-        response
-    );
+    "[PRIVACY] Capture response received:",
+    {
+        success: response?.success === true,
+        sanitizedImage: Boolean(response?.sanitizedImage),
+        detectionCount: Array.isArray(response?.detections)
+            ? response.detections.length
+            : 0,
+        domElementCount: Array.isArray(response?.dom_elements)
+            ? response.dom_elements.length
+            : 0
+    }
+);
 
 
     if (!response) {
@@ -391,18 +400,18 @@ async function captureSanitizedScreen() {
 
 
     console.log(
-        "🔒 Sanitized screenshot received."
+        " Sanitized screenshot received."
     );
 
 
     console.log(
-        "🛡️ Local PII detections:",
+        " Local PII detections:",
         response.detections?.length || 0
     );
 
 
     console.log(
-        "🧩 Safe DOM elements:",
+        " Safe DOM elements:",
         response.dom_elements?.length || 0
     );
 
@@ -420,9 +429,31 @@ async function executeAction(
 ) {
 
     console.log(
-        "🎯 Sending action to browser:",
-        action
-    );
+    "[ACTION] Sending browser action:",
+    {
+        action:
+            action?.action ||
+            action?.type ||
+            "none",
+
+        confidence:
+            Number(
+                action?.confidence || 0
+            ),
+
+        valueLength:
+            (
+                action?.action === "type" ||
+                action?.type === "type"
+            )
+                ? String(
+                    action?.text ??
+                    action?.value ??
+                    ""
+                ).length
+                : undefined
+    }
+);
 
 
     if (!action) {
@@ -447,9 +478,22 @@ async function executeAction(
 
 
     console.log(
-        "🖱️ Execution response:",
-        response
-    );
+    "[ACTION] Execution response:",
+    {
+        success:
+            response?.success === true,
+
+        action:
+            response?.result?.action ||
+            response?.action ||
+            "unknown",
+
+        error:
+            response?.error ||
+            response?.result?.error ||
+            undefined
+    }
+);
 
 
     return response;
@@ -525,7 +569,7 @@ function isCaptureQuotaError(
 async function captureFinalState() {
 
     console.log(
-        "📸 Capturing final/new sanitized page state..."
+        " Capturing final/new sanitized page state..."
     );
 
 
@@ -541,7 +585,7 @@ async function captureFinalState() {
         try {
 
             console.log(
-                `📸 Capture attempt ${attempt}/${MAX_CAPTURE_RETRIES}`
+                ` Capture attempt ${attempt}/${MAX_CAPTURE_RETRIES}`
             );
 
 
@@ -550,7 +594,7 @@ async function captureFinalState() {
 
 
             console.log(
-                "🛡️ New sanitized screenshot captured."
+                " New sanitized screenshot captured."
             );
 
 
@@ -573,7 +617,7 @@ async function captureFinalState() {
 
 
             console.warn(
-                `⚠️ Chrome capture quota hit on attempt ${attempt}.`
+                ` Chrome capture quota hit on attempt ${attempt}.`
             );
 
 
@@ -583,7 +627,7 @@ async function captureFinalState() {
             ) {
 
                 console.log(
-                    `⏳ Waiting ${CAPTURE_RETRY_DELAY_MS} ms before retry...`
+                    ` Waiting ${CAPTURE_RETRY_DELAY_MS} ms before retry...`
                 );
 
 
@@ -604,8 +648,387 @@ async function captureFinalState() {
         "Could not capture sanitized screen after retries."
     );
 }
+function sanitizeDomLabel(label) {
+    const text =
+        String(label || "")
+            .replace(/\s+/g, " ")
+            .trim()
+            .slice(0, 80);
 
+    if (!text) {
+        return "";
+    }
 
+    // Do not transmit obvious sensitive values.
+    const sensitivePatterns = [
+    /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i,
+    /\b(?:\+?91[-\s]?)?[6-9]\d{9}\b/,
+    /\b\d{4}\s?\d{4}\s?\d{4}\b/,
+    /\b[A-Z]{5}\d{4}[A-Z]\b/i,
+    /\b(?:\d[ -]*?){13,19}\b/,
+    /\b(?:otp|one[-\s]?time[-\s]?password)\b/i,
+    /\b(?:password|passwd|passcode|pin|credential|secret)\b/i
+];
+
+    for (const pattern of sensitivePatterns) {
+        if (pattern.test(text)) {
+            return "";
+        }
+    }
+
+    return text;
+}
+// ============================================================
+// FINAL PRIVACY PAYLOAD GATE
+// ============================================================
+//
+// This is the final client-side security boundary before
+// anything is transmitted to FastAPI.
+//
+// Rules:
+// - Screenshot must be sanitized.
+// - Detection values are forbidden.
+// - DOM values are forbidden.
+// - Password / OTP / credential data are forbidden.
+// - URL query parameters and fragments are forbidden.
+// - Only safe metadata is allowed.
+// ============================================================
+
+function buildPrivacySafePayload(
+    captureResponse,
+    task
+) {
+    if (
+        !captureResponse ||
+        typeof captureResponse !== "object"
+    ) {
+        throw new Error(
+            "Invalid capture response."
+        );
+    }
+
+    const sanitizedImage =
+        captureResponse.sanitizedImage;
+
+    if (
+        typeof sanitizedImage !== "string" ||
+        !sanitizedImage.startsWith(
+            "data:image/"
+        )
+    ) {
+        throw new Error(
+            "Privacy gate blocked transmission: " +
+            "sanitized screenshot is missing."
+        );
+    }
+
+    // --------------------------------------------------------
+    // DETECTIONS
+    // --------------------------------------------------------
+
+    const rawDetections =
+        Array.isArray(
+            captureResponse.detections
+        )
+            ? captureResponse.detections
+            : [];
+
+    const safeDetections =
+        rawDetections.map(
+            (detection, index) => {
+
+                if (
+                    !detection ||
+                    typeof detection !== "object"
+                ) {
+                    throw new Error(
+                        `Privacy gate blocked detection ${index}.`
+                    );
+                }
+
+                // Existing detected values must NEVER
+                // cross the privacy boundary.
+                if (
+                    Object.prototype.hasOwnProperty.call(
+                        detection,
+                        "value"
+                    )
+                ) {
+                    throw new Error(
+                        "Privacy gate blocked transmission: " +
+                        "PII value found in detection metadata."
+                    );
+                }
+
+                return {
+                    id:
+                        detection.id ??
+                        index,
+
+                    type:
+                        String(
+                            detection.type || ""
+                        ),
+
+                    source:
+                        String(
+                            detection.source || ""
+                        ),
+
+                    tagName:
+                        String(
+                            detection.tagName || ""
+                        ),
+
+                    rect:
+                        detection.rect &&
+                        typeof detection.rect === "object"
+                            ? {
+                                left:
+                                    Number(
+                                        detection.rect.left || 0
+                                    ),
+
+                                top:
+                                    Number(
+                                        detection.rect.top || 0
+                                    ),
+
+                                right:
+                                    Number(
+                                        detection.rect.right || 0
+                                    ),
+
+                                bottom:
+                                    Number(
+                                        detection.rect.bottom || 0
+                                    ),
+
+                                width:
+                                    Number(
+                                        detection.rect.width || 0
+                                    ),
+
+                                height:
+                                    Number(
+                                        detection.rect.height || 0
+                                    )
+                            }
+                            : undefined
+                };
+            }
+        );
+
+    // --------------------------------------------------------
+    // DOM METADATA
+    // --------------------------------------------------------
+
+    const rawDomElements =
+        Array.isArray(
+            captureResponse.dom_elements
+        )
+            ? captureResponse.dom_elements
+            : [];
+
+    const FORBIDDEN_KEYS = new Set([
+        "value",
+        "inputValue",
+        "input_value",
+        "password",
+        "otp",
+        "secret",
+        "credential",
+        "credentials",
+        "innerValue",
+        "rawValue",
+        "fieldValue"
+    ]);
+
+    const safeDomElements =
+        rawDomElements.map(
+            (element, index) => {
+
+                if (
+                    !element ||
+                    typeof element !== "object"
+                ) {
+                    throw new Error(
+                        `Privacy gate blocked DOM element ${index}.`
+                    );
+                }
+
+                for (
+                    const key of Object.keys(element)
+                ) {
+                    if (
+                        FORBIDDEN_KEYS.has(
+                            key
+                        )
+                    ) {
+                        throw new Error(
+                            "Privacy gate blocked transmission: " +
+                            `sensitive DOM property "${key}" detected.`
+                        );
+                    }
+                }
+
+                return {
+    index,
+
+    tag:
+        String(
+            element.tag ||
+            element.tagName ||
+            ""
+        ),
+
+    type:
+        String(
+            element.type || ""
+        ),
+
+    role:
+        String(
+            element.role || ""
+        ),
+
+    // Only retain semantic metadata.
+    // Never transmit arbitrary DOM text.
+   label:
+    element.is_button
+        ? sanitizeDomLabel(
+            element.label
+        )
+        : "",
+
+    x:
+        Number(
+            element.x || 0
+        ),
+
+    y:
+        Number(
+            element.y || 0
+        ),
+
+    width:
+        Number(
+            element.width || 0
+        ),
+
+    height:
+        Number(
+            element.height || 0
+        ),
+
+    in_viewport:
+        Boolean(
+            element.in_viewport
+        ),
+
+    is_button:
+        Boolean(
+            element.is_button
+        )
+};
+            }
+        );
+
+   
+
+// --------------------------------------------------------
+// PAGE URL
+// --------------------------------------------------------
+
+const rawPageUrl =
+    String(
+        captureResponse.page_url || ""
+    );
+
+let safePageUrl = "";
+
+try {
+    const parsedUrl =
+        new URL(rawPageUrl);
+
+    // Never transmit query parameters or fragments.
+    // Only the origin is required for planner context.
+    safePageUrl =
+        parsedUrl.origin;
+
+} catch (_) {
+    safePageUrl = "";
+}
+
+    // --------------------------------------------------------
+    // VIEWPORT
+    // --------------------------------------------------------
+
+    const rawViewport =
+        captureResponse.viewport;
+
+    const safeViewport =
+        rawViewport &&
+        typeof rawViewport === "object"
+            ? {
+                width:
+                    Number(
+                        rawViewport.width || 0
+                    ),
+
+                height:
+                    Number(
+                        rawViewport.height || 0
+                    ),
+
+                devicePixelRatio:
+                    Number(
+                        rawViewport.devicePixelRatio || 1
+                    )
+            }
+            : null;
+
+    // --------------------------------------------------------
+    // TASK
+    // --------------------------------------------------------
+    //
+    // The task is intentionally preserved because the user
+    // may explicitly provide a value to type.
+    //
+    // Example:
+    // Fill Full Name with "Amit Kumar"
+    //
+    // This is user-provided instruction, NOT webpage-derived
+    // PII.
+    // --------------------------------------------------------
+
+    const safeTask =
+        String(task || "").trim();
+
+    // --------------------------------------------------------
+    // FINAL PAYLOAD
+    // --------------------------------------------------------
+
+    return {
+        screenshot:
+            sanitizedImage,
+
+        detections:
+            safeDetections,
+
+        page_url:
+            safePageUrl,
+
+        dom_elements:
+            safeDomElements,
+
+        viewport:
+            safeViewport,
+
+        task:
+            safeTask
+    };
+}
 // ============================================================
 // API — ANALYZE SANITIZED CONTEXT
 // ============================================================
@@ -655,7 +1078,7 @@ async function analyzeSanitizedContext(
 
 
     console.log(
-        "🔒 Screenshot:",
+        " Screenshot:",
         sanitizedImage
             ? "SANITIZED"
             : "MISSING"
@@ -663,27 +1086,31 @@ async function analyzeSanitizedContext(
 
 
     console.log(
-        "🛡️ PII detections:",
+        " PII detections:",
         detections.length
     );
 
 
     console.log(
-        "🧩 Safe DOM elements:",
+        " Safe DOM elements:",
         domElements.length
     );
 
 
     console.log(
-        "📝 Planner task:",
-        task
-    );
+    "[PLANNER] Task prepared:",
+    {
+        length: String(task || "").length,
+hasExplicitValue:
+    hasExplicitQuotedValue(task)
+    }
+);
 
 
     console.log(
-        "🌐 Page:",
-        pageUrl
-    );
+    "[PLANNER] Page context available:",
+    Boolean(pageUrl)
+);
 
 
     console.log(
@@ -703,43 +1130,66 @@ async function analyzeSanitizedContext(
     // No raw screenshot is sent.
     // ========================================================
 
-    const response =
-        await fetch(
-            API_URL,
-            {
+    // ========================================================
+// FINAL PRIVACY GATE
+// ========================================================
+//
+// Nothing reaches FastAPI until the payload passes the
+// client-side privacy validation.
+// ========================================================
 
-                method:
-                    "POST",
+const privacySafePayload =
+    buildPrivacySafePayload(
+        captureResponse,
+        task
+    );
 
-                headers: {
+console.log(
+    "[PRIVACY] Final transmission gate approved:",
+    {
+        sanitizedScreenshot:
+            Boolean(
+                privacySafePayload.screenshot
+            ),
 
-                    "Content-Type":
-                        "application/json"
-                },
+        detectionCount:
+            privacySafePayload
+                .detections
+                .length,
 
-                body:
-                    JSON.stringify({
+        domElementCount:
+            privacySafePayload
+                .dom_elements
+                .length,
 
-                        screenshot:
-                            sanitizedImage,
+        pageUrl:
+            privacySafePayload.page_url,
 
-                        detections:
-                            detections,
+        taskPresent:
+            Boolean(
+                privacySafePayload.task
+            )
+    }
+);
 
-                        page_url:
-                            pageUrl,
+const response =
+    await fetch(
+        API_URL,
+        {
+            method:
+                "POST",
 
-                        dom_elements:
-                            domElements,
+            headers: {
+                "Content-Type":
+                    "application/json"
+            },
 
-                        viewport:
-                            viewport,
-
-                        task:
-                            task
-                    })
-            }
-        );
+            body:
+                JSON.stringify(
+                    privacySafePayload
+                )
+        }
+    );
 
 
     const networkLatency =
@@ -752,7 +1202,7 @@ async function analyzeSanitizedContext(
 
 
     console.log(
-        `🌐 Network latency: ${networkLatency.toFixed(2)} ms`
+        ` Network latency: ${networkLatency.toFixed(2)} ms`
     );
 
 
@@ -769,9 +1219,29 @@ async function analyzeSanitizedContext(
 
 
     console.log(
-        "🤖 Planner response:",
-        data
-    );
+    "[PLANNER] Response received:",
+    {
+        success:
+            data?.success === true,
+
+        action:
+            data?.action?.action ||
+            data?.action?.type ||
+            "none",
+
+        confidence:
+            Number(
+                data?.action?.confidence || 0
+            ),
+
+        plannerLatency:
+            Number(
+                data?.vlm_latency_ms ||
+                data?.processing_time_ms ||
+                0
+            )
+    }
+);
 
 
     if (!data.success) {
@@ -966,8 +1436,8 @@ function renderActionHistory() {
                                 item.description
                             )}
 
-                            <span class="success">
-                                ✅
+                            <span class="success status-success">
+                                Successful
                             </span>
                         </div>
                     `;
@@ -1007,7 +1477,7 @@ function showNoActionResult(
 
     showResult(
 
-        "ℹ️ Agent completed",
+        " Agent completed",
 
         `
             <div class="row">
@@ -1039,12 +1509,14 @@ function showNoActionResult(
             </div>
 
             <div class="row">
-                <span class="label">
-                    Reason:
-                </span>
+    <span class="label">
+        Planner status:
+    </span>
 
-                ${escapeHTML(reason)}
-            </div>
+    <span class="status-success">
+        Safe action selected
+    </span>
+</div>
 
             <div class="row">
                 <span class="label">
@@ -1073,7 +1545,7 @@ function showNoActionResult(
             />
 
             <div class="small">
-                🔒 Screenshot sanitized locally.
+                 Screenshot sanitized locally.
                 No raw screenshot was sent to the AI.
             </div>
         `,
@@ -1111,7 +1583,7 @@ function showExecutionFailure(
 
     showResult(
 
-        "⚠️ Agent Action Failed",
+        " Agent Action Failed",
 
         `
             <div class="row">
@@ -1143,15 +1615,16 @@ function showExecutionFailure(
             </div>
 
             <div class="row">
-                <span class="label">
-                    Reason:
-                </span>
+    <span class="label">
+        Planner status:
+    </span>
 
-                ${escapeHTML(reason)}
-            </div>
-
+    <span class="status-error">
+        Action execution failed
+    </span>
+</div>
             <div class="row error">
-                Execution: ❌ Failed
+                Execution:  Failed
             </div>
 
             <div class="row error">
@@ -1185,7 +1658,7 @@ function showExecutionFailure(
             />
 
             <div class="small">
-                🔒 Raw screenshot was not sent to the AI.
+                 Raw screenshot was not sent to the AI.
             </div>
         `,
 
@@ -1234,7 +1707,7 @@ function showAgentCompleted(
                             )}
 
                             <span class="success">
-                                ✅ Successful
+                                 Successful
                             </span>
                         </div>
                     `;
@@ -1245,11 +1718,11 @@ function showAgentCompleted(
 
     showResult(
 
-        "✅ Private Agent Completed",
+        " Private Agent Completed",
 
         `
             <div class="privacy-badge">
-                🔒 SANITIZED BEFORE EVERY AI STEP
+                 SANITIZED BEFORE EVERY AI STEP
             </div>
 
             <div class="row">
@@ -1329,7 +1802,7 @@ function showAgentCompleted(
             }
 
             <div class="small">
-                🔒 Sensitive pixels are redacted locally.
+                 Sensitive pixels are redacted locally.
                 The AI receives only sanitized visual context.
             </div>
         `,
@@ -1354,11 +1827,11 @@ function showProgress(
 
     showResult(
 
-        `🤖 Agent Step ${stepNumber}`,
+        ` Agent Step ${stepNumber}`,
 
         `
             <div class="privacy-badge">
-                🔒 SANITIZED BEFORE AI
+                 SANITIZED BEFORE AI
             </div>
 
             <div class="row">
@@ -1390,12 +1863,14 @@ function showProgress(
             </div>
 
             <div class="row">
-                <span class="label">
-                    Reason:
-                </span>
+    <span class="label">
+        Planner status:
+    </span>
 
-                ${escapeHTML(reason)}
-            </div>
+    <span class="status-success">
+        Safe action selected
+    </span>
+</div>
 
             <div class="row">
                 <span class="label">
@@ -1408,7 +1883,7 @@ function showProgress(
             ${renderActionHistory()}
 
             <div class="small">
-                🔄 Executing step ${stepNumber}...
+                 Executing step ${stepNumber}...
             </div>
         `,
 
@@ -1426,7 +1901,7 @@ async function captureAndAnalyze() {
     if (agentRunning) {
 
         console.log(
-            "⚠️ Agent is already running."
+            " Agent is already running."
         );
 
         return;
@@ -1487,9 +1962,16 @@ async function captureAndAnalyze() {
 
 
         console.log(
-            "📝 User task:",
-            originalTask
-        );
+    "[AGENT] User task received:",
+    {
+        length:
+            originalTask.length,
+        hasExplicitValue:
+            hasExplicitQuotedValue(
+                originalTask
+            )
+    }
+);
 
 
         // ====================================================
@@ -1506,7 +1988,7 @@ async function captureAndAnalyze() {
 
             showResult(
 
-                "🔒 Explicit value required",
+                " Explicit value required",
 
                 `
                     <div class="row error">
@@ -1541,7 +2023,7 @@ async function captureAndAnalyze() {
 
 
         console.log(
-            "🔀 Compound task:",
+            " Compound task:",
             compoundTask
         );
 
@@ -1598,9 +2080,13 @@ async function captureAndAnalyze() {
 
 
             console.log(
-                "📝 Planner task:",
-                currentTask
-            );
+    "[PLANNER] Task prepared:",
+    {
+        length: String(currentTask || "").length,
+        hasExplicitValue:
+            hasExplicitQuotedValue(currentTask)
+    }
+);
 
 
             // =================================================
@@ -1615,21 +2101,20 @@ async function captureAndAnalyze() {
 
 
             console.log(
-                "🤖 Action:",
+                " Action:",
                 analysis.actionType
             );
 
 
             console.log(
-                "🎯 Confidence:",
+                " Confidence:",
                 analysis.confidence
             );
 
 
             console.log(
-                "💡 Reason:",
-                analysis.reason
-            );
+    "[PLANNER] Reason received."
+);
 
 
             // =================================================
@@ -1642,7 +2127,7 @@ async function captureAndAnalyze() {
             ) {
 
                 console.log(
-                    "ℹ️ Planner returned no safe action."
+                    " Planner returned no safe action."
                 );
 
 
@@ -1702,7 +2187,7 @@ async function captureAndAnalyze() {
             // =================================================
 
             console.log(
-                `🚀 Executing step ${step}:`,
+                ` Executing step ${step}:`,
                 describeAction(
                     analysis.action
                 )
@@ -1716,9 +2201,22 @@ async function captureAndAnalyze() {
 
 
             console.log(
-                "⚙️ Execution response:",
-                executionResponse
-            );
+    "[ACTION] Execution response:",
+    {
+        success:
+            executionResponse?.success === true,
+
+        action:
+            executionResponse?.result?.action ||
+            executionResponse?.action ||
+            "unknown",
+
+        error:
+            executionResponse?.error ||
+            executionResponse?.result?.error ||
+            undefined
+    }
+);
 
 
             const executionSuccess =
@@ -1734,9 +2232,19 @@ async function captureAndAnalyze() {
             if (!executionSuccess) {
 
                 console.error(
-                    "❌ Browser action failed:",
-                    executionResponse
-                );
+    "[ACTION] Browser action failed:",
+    {
+        success: false,
+        action:
+            executionResponse?.result?.action ||
+            executionResponse?.action ||
+            "unknown",
+        error:
+            executionResponse?.error ||
+            executionResponse?.result?.error ||
+            "Unknown execution error"
+    }
+);
 
 
                 showExecutionFailure(
@@ -1760,36 +2268,29 @@ async function captureAndAnalyze() {
             // =================================================
 
             completedActions.push({
+    action: analysis.actionType,
 
-                action:
-                    analysis.actionType,
+    description: describeAction(
+        analysis.action
+    ),
 
-                description:
-                    describeAction(
-                        analysis.action
-                    ),
+    confidence: analysis.confidence,
 
-                confidence:
-                    analysis.confidence,
+    plannerLatency:
+        analysis.plannerLatency,
 
-                reason:
-                    analysis.reason,
-
-                plannerLatency:
-                    analysis.plannerLatency,
-
-                networkLatency:
-                    analysis.networkLatency
-            });
+    networkLatency:
+        analysis.networkLatency
+});
 
 
             console.log(
-                `✅ Step ${step} executed successfully.`
+                ` Step ${step} executed successfully.`
             );
 
 
             console.log(
-                "📊 Completed actions:",
+                " Completed actions:",
                 completedActions.length
             );
 
@@ -1824,7 +2325,7 @@ async function captureAndAnalyze() {
                 );
 
                 console.log(
-                    "🎉 COMPOUND TASK COMPLETED"
+                    " COMPOUND TASK COMPLETED"
                 );
 
                 console.log(
@@ -1833,17 +2334,17 @@ async function captureAndAnalyze() {
 
 
                 console.log(
-                    "✅ TYPE step completed."
+                    " TYPE step completed."
                 );
 
 
                 console.log(
-                    "✅ CLICK SUBMIT step completed."
+                    " CLICK SUBMIT step completed."
                 );
 
 
                 console.log(
-                    "🎯 All requested browser actions executed successfully."
+                    " All requested browser actions executed successfully."
                 );
 
 
@@ -1861,13 +2362,13 @@ async function captureAndAnalyze() {
 
 
                     console.log(
-                        "🔒 Final sanitized state captured."
+                        " Final sanitized state captured."
                     );
 
                 } catch (finalCaptureError) {
 
                     console.warn(
-                        "⚠️ Final sanitized capture unavailable:"
+                        " Final sanitized capture unavailable:"
                     );
 
 
@@ -1877,7 +2378,7 @@ async function captureAndAnalyze() {
 
 
                     console.log(
-                        "🔒 Keeping previous valid sanitized state."
+                        " Keeping previous valid sanitized state."
                     );
                 }
 
@@ -1907,7 +2408,7 @@ async function captureAndAnalyze() {
             // =================================================
 
             console.log(
-                "📸 Capturing NEW state after action..."
+                "Capturing NEW state after action..."
             );
 
 
@@ -1919,14 +2420,14 @@ async function captureAndAnalyze() {
             } catch (captureError) {
 
                 console.error(
-                    "❌ Post-action capture failed:",
+                    "Post-action capture failed:",
                     captureError
                 );
 
 
                 showResult(
 
-                    "⚠️ Action executed, but recapture failed",
+                    "Action executed, but recapture failed",
 
                     `
                         <div class="row">
@@ -1951,7 +2452,7 @@ async function captureAndAnalyze() {
 
                         <div class="row success">
                             Last action:
-                            ✅ Executed
+                             Executed
                         </div>
 
                         <div class="row error">
@@ -2010,7 +2511,7 @@ async function captureAndAnalyze() {
                 );
 
                 console.log(
-                    "🔄 COMPOUND TASK CONTINUATION"
+                    " COMPOUND TASK CONTINUATION"
                 );
 
                 console.log(
@@ -2019,12 +2520,12 @@ async function captureAndAnalyze() {
 
 
                 console.log(
-                    "✅ TYPE step completed."
+                    " TYPE step completed."
                 );
 
 
                 console.log(
-                    "➡️ Next required action: CLICK SUBMIT"
+                    " Next required action: CLICK SUBMIT"
                 );
 
 
@@ -2049,18 +2550,18 @@ async function captureAndAnalyze() {
 
 
                 console.log(
-                    "📝 Next planner task:",
+                    " Next planner task:",
                     currentTask
                 );
 
 
                 console.log(
-                    "🔒 Fresh sanitized state assigned."
+                    " Fresh sanitized state assigned."
                 );
 
 
                 console.log(
-                    "➡️ Continuing to next planner step..."
+                    " Continuing to next planner step..."
                 );
 
 
@@ -2106,7 +2607,7 @@ async function captureAndAnalyze() {
                 );
 
                 console.log(
-                    "🔄 COMPOUND TASK SCROLL CONTINUATION"
+                    " COMPOUND TASK SCROLL CONTINUATION"
                 );
 
                 console.log(
@@ -2115,12 +2616,12 @@ async function captureAndAnalyze() {
 
 
                 console.log(
-                    "✅ SCROLL step completed."
+                    " SCROLL step completed."
                 );
 
 
                 console.log(
-                    "➡️ Re-planning after scroll..."
+                    " Re-planning after scroll..."
                 );
 
 
@@ -2132,18 +2633,18 @@ async function captureAndAnalyze() {
 
 
                 console.log(
-                    "🔒 Fresh sanitized state assigned after scroll."
+                    " Fresh sanitized state assigned after scroll."
                 );
 
 
                 console.log(
-                    "📝 Next planner task:",
+                    " Next planner task:",
                     currentTask
                 );
 
 
                 console.log(
-                    "➡️ Continuing to next planner step..."
+                    " Continuing to next planner step..."
                 );
 
 
@@ -2168,7 +2669,7 @@ async function captureAndAnalyze() {
             // =================================================
 
             console.log(
-                "✅ Single-step task completed."
+                " Single-step task completed."
             );
 
 
@@ -2193,7 +2694,7 @@ async function captureAndAnalyze() {
 
         showResult(
 
-            "⚠️ Agent stopped safely",
+            "Agent stopped safely",
 
             `
                 <div class="row">
@@ -2233,14 +2734,18 @@ async function captureAndAnalyze() {
     } catch (error) {
 
         console.error(
-            "❌ Private Agent pipeline error:",
-            error
-        );
+    "[AGENT] Pipeline failed:",
+    {
+        message:
+            error?.message ||
+            "Unknown pipeline error"
+    }
+);
 
 
         showResult(
 
-            "❌ Pipeline Error",
+            " Pipeline Error",
 
             `
                 <div class="row error">
@@ -2283,9 +2788,9 @@ async function captureAndAnalyze() {
 
 
         console.log(
-            "Completed actions:",
-            completedActions
-        );
+    "[AGENT] Completed actions:",
+    completedActions.length
+);
 
 
         console.log(
@@ -2446,25 +2951,25 @@ if (captureButton) {
 // ============================================================
 
 console.log(
-    "✅ Private Agent popup listeners attached"
+    " Private Agent popup listeners attached"
 );
 
 
 console.log(
-    "🔒 Multi-step private agent enabled"
+    " Multi-step private agent enabled"
 );
 
 
 console.log(
-    "🔒 Screenshot-only PII masking enabled"
+    " Screenshot-only PII masking enabled"
 );
 
 
 console.log(
-    "🤖 Compound TYPE → SUBMIT flow enabled"
+    " Compound TYPE → SUBMIT flow enabled"
 );
 
 
 console.log(
-    "📜 Compound SCROLL → CONTINUE flow enabled"
+    " Compound SCROLL → CONTINUE flow enabled"
 );

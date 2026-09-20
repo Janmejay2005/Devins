@@ -867,10 +867,10 @@ function detectDOMPII() {
 
 
     console.log(
-        "🔍 Local PII detections:",
-        detections.length,
-        detections
-    );
+    "[PRIVACY] Local PII detection completed:",
+    detections.length,
+    "regions"
+);
 }
 
 
@@ -888,6 +888,27 @@ function resetDetections() {
 // SERIALIZABLE DETECTIONS
 // ============================================================
 
+// ============================================================
+// SERIALIZABLE DETECTIONS
+// ============================================================
+//
+// SECURITY RULE:
+//
+// Detection values are LOCAL-ONLY.
+//
+// The actual PII value is required internally for detection,
+// but it must NEVER be serialized into a message sent outside
+// the content script.
+//
+// The server only needs:
+// - detection type
+// - source
+// - element type
+// - redaction rectangle
+//
+// It does NOT need the detected value.
+//
+
 function getSerializableDetections() {
 
     return detections.map(
@@ -899,9 +920,6 @@ function getSerializableDetections() {
             type:
                 detection.type,
 
-            value:
-                detection.value,
-
             source:
                 detection.source,
 
@@ -910,6 +928,38 @@ function getSerializableDetections() {
 
             rect:
                 detection.rect
+                    ? {
+                        left:
+                            Number(
+                                detection.rect.left
+                            ),
+
+                        top:
+                            Number(
+                                detection.rect.top
+                            ),
+
+                        right:
+                            Number(
+                                detection.rect.right
+                            ),
+
+                        bottom:
+                            Number(
+                                detection.rect.bottom
+                            ),
+
+                        width:
+                            Number(
+                                detection.rect.width
+                            ),
+
+                        height:
+                            Number(
+                                detection.rect.height
+                            )
+                    }
+                    : null
         })
     );
 }
@@ -2180,25 +2230,14 @@ function executeClick(
 
     return {
 
-        success: true,
+    success: true,
 
-        action:
-            "click",
+    action:
+        "click",
 
-        element:
-            clickable.tagName,
-
-        text:
-            normalizeText(
-                clickable.innerText ||
-                clickable.textContent ||
-                clickable.value ||
-                ""
-            ).slice(
-                0,
-                120
-            )
-    };
+    element:
+        clickable.tagName
+};
 }
 
 
@@ -3091,9 +3130,16 @@ chrome.runtime.onMessage.addListener(
 
 
             console.log(
-                "✅ Action execution result:",
-                result
-            );
+    "[ACTION] Execution completed:",
+    {
+        success:
+            result?.success === true,
+
+        action:
+            result?.action ||
+            "unknown"
+    }
+);
 
 
             sendResponse(

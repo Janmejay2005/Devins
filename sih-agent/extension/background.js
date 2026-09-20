@@ -4,8 +4,249 @@
 // ============================================================
 
 console.log(
-    "🔵 SIH Privacy Agent background service started"
+    "[SIH] Privacy Agent background service started"
 );
+
+
+// ============================================================
+// SANITIZE DETECTION METADATA
+// ============================================================
+//
+// Defense-in-depth.
+//
+// The content script should already avoid serializing PII values.
+// The background service applies a second privacy boundary before
+// any metadata can reach the network layer.
+//
+// IMPORTANT:
+// `value` is intentionally NOT included.
+// ============================================================
+
+function sanitizeDetectionMetadata(detections) {
+
+    if (!Array.isArray(detections)) {
+        return [];
+    }
+
+    return detections
+        .map((detection) => {
+
+            if (
+                !detection ||
+                typeof detection !== "object"
+            ) {
+                return null;
+            }
+
+            return {
+                id: String(
+                    detection.id || ""
+                ),
+
+                type: String(
+                    detection.type || ""
+                ),
+
+                source: String(
+                    detection.source || ""
+                ),
+
+                tagName: String(
+                    detection.tagName || ""
+                ),
+
+                rect: detection.rect
+                    ? {
+                        left: Number(
+                            detection.rect.left
+                        ),
+
+                        top: Number(
+                            detection.rect.top
+                        ),
+
+                        right: Number(
+                            detection.rect.right
+                        ),
+
+                        bottom: Number(
+                            detection.rect.bottom
+                        ),
+
+                        width: Number(
+                            detection.rect.width
+                        ),
+
+                        height: Number(
+                            detection.rect.height
+                        )
+                    }
+                    : null
+            };
+        })
+        .filter(Boolean);
+}
+
+
+// ============================================================
+// PRIVACY-SAFE ACTION LOGGING
+// ============================================================
+//
+// NEVER log the complete action object.
+//
+// A type action can contain:
+// {
+//     text: "Amit Kumar"
+// }
+//
+// or worse:
+// {
+//     text: "password123"
+// }
+//
+// Therefore only non-sensitive metadata is logged.
+//
+// The REAL action object is still passed to the content script.
+// Only the console representation is sanitized.
+// ============================================================
+
+function getSafeActionLog(action) {
+
+    if (
+        !action ||
+        typeof action !== "object"
+    ) {
+        return {
+            action: "none"
+        };
+    }
+
+    const actionType =
+        String(
+            action.action ||
+            action.type ||
+            "none"
+        )
+            .toLowerCase()
+            .trim();
+
+    const safe = {
+        action: actionType,
+
+        confidence: Number(
+            action.confidence || 0
+        )
+    };
+
+
+    // --------------------------------------------------------
+    // CLICK
+    // --------------------------------------------------------
+
+    if (
+        actionType === "click"
+    ) {
+
+        safe.target = {
+            x: Number(
+                action.x ??
+                action.target?.x ??
+                0
+            ),
+
+            y: Number(
+                action.y ??
+                action.target?.y ??
+                0
+            )
+        };
+    }
+
+
+    // --------------------------------------------------------
+    // TYPE
+    // --------------------------------------------------------
+    //
+    // NEVER log:
+    // action.text
+    // action.value
+    //
+    // Only log its length.
+    // --------------------------------------------------------
+
+    if (
+        actionType === "type"
+    ) {
+
+        safe.valueLength =
+            String(
+                action.text ??
+                action.value ??
+                ""
+            ).length;
+    }
+
+
+    // --------------------------------------------------------
+    // SCROLL / WAIT
+    // --------------------------------------------------------
+
+    if (
+        actionType === "scroll" ||
+        actionType === "wait"
+    ) {
+
+        safe.amount =
+            Number(
+                action.amount ??
+                action.value ??
+                0
+            );
+    }
+
+
+    return safe;
+}
+
+
+// ============================================================
+// PRIVACY-SAFE PAGE URL
+// ============================================================
+//
+// Never transmit:
+// - query parameters
+// - URL fragments
+// - username/password from URL
+//
+// Example:
+//
+// https://example.com/form?email=user@example.com&token=123
+//
+// becomes:
+//
+// https://example.com/form
+// ============================================================
+
+function getPrivacySafePageUrl(rawUrl) {
+
+    if (!rawUrl) {
+        return "";
+    }
+
+    try {
+
+        const url =
+            new URL(rawUrl);
+
+        return (
+            `${url.origin}${url.pathname}`
+        );
+
+    } catch (_) {
+
+        return "";
+    }
+}
 
 
 // ============================================================
@@ -15,7 +256,7 @@ console.log(
 async function captureAndSanitize() {
 
     console.log(
-        "📸 Starting capture and sanitization..."
+        "[CAPTURE] Starting local capture and sanitization..."
     );
 
 
@@ -54,9 +295,8 @@ async function captureAndSanitize() {
 
 
     console.log(
-        "🌐 Active tab:",
-        tab.id,
-        tab.url
+        "[CAPTURE] Active tab:",
+        tab.id
     );
 
 
@@ -81,10 +321,9 @@ async function captureAndSanitize() {
     } catch (error) {
 
         console.error(
-            "❌ PREPARE_CAPTURE failed:",
-            error
+            "[CAPTURE] PREPARE_CAPTURE failed:",
+            error?.message || error
         );
-
 
         throw new Error(
             "Could not communicate with content script. " +
@@ -105,10 +344,27 @@ async function captureAndSanitize() {
 
 
     console.log(
-        "🛡️ Capture prepared:",
+        "[PRIVACY] Local PII detection completed:",
         prepareResponse.detections?.length || 0,
-        "PII detections"
+        "regions"
     );
+
+
+    // ========================================================
+    // SANITIZE DETECTION METADATA
+    // ========================================================
+    //
+    // IMPORTANT:
+    // This happens AFTER prepareResponse exists.
+    //
+    // The previous version attempted to use
+    // prepareResponse before it was declared.
+    // ========================================================
+
+    const safeDetections =
+        sanitizeDetectionMetadata(
+            prepareResponse.detections || []
+        );
 
 
     // ========================================================
@@ -131,14 +387,13 @@ async function captureAndSanitize() {
     } catch (error) {
 
         console.error(
-            "❌ Screenshot capture failed:",
-            error
+            "[CAPTURE] Screenshot capture failed:",
+            error?.message || error
         );
-
 
         throw new Error(
             "Could not capture the current screen: " +
-            error.message
+            (error?.message || "Unknown capture error")
         );
     }
 
@@ -152,17 +407,20 @@ async function captureAndSanitize() {
 
 
     console.log(
-        "📸 Raw screenshot captured locally."
+        "[CAPTURE] Raw screenshot captured locally."
     );
 
 
     // ========================================================
     // LOCAL SANITIZATION
+    // ========================================================
     //
     // IMPORTANT:
     //
-    // The raw screenshot is used ONLY inside the extension
-    // for local sanitization.
+    // The raw screenshot exists only inside the extension.
+    //
+    // It is sent to the content script solely so that local
+    // redaction can be performed.
     //
     // The raw screenshot is NEVER sent to FastAPI.
     // ========================================================
@@ -179,7 +437,9 @@ async function captureAndSanitize() {
                     type:
                         "SANITIZE_SCREENSHOT",
 
-                    screenshot,
+                    screenshot:
+
+                        screenshot,
 
                     detections:
                         prepareResponse.detections || []
@@ -189,14 +449,13 @@ async function captureAndSanitize() {
     } catch (error) {
 
         console.error(
-            "❌ SANITIZE_SCREENSHOT failed:",
-            error
+            "[PRIVACY] SANITIZE_SCREENSHOT failed:",
+            error?.message || error
         );
-
 
         throw new Error(
             "Could not sanitize the screenshot: " +
-            error.message
+            (error?.message || "Unknown sanitization error")
         );
     }
 
@@ -224,8 +483,31 @@ async function captureAndSanitize() {
 
 
     console.log(
-        "🛡️ Screenshot sanitized locally."
+        "[PRIVACY] Screenshot sanitized locally."
     );
+
+
+    // ========================================================
+    // SANITIZED DOM METADATA
+    // ========================================================
+    //
+    // Only metadata is allowed to leave the extension.
+    //
+    // We intentionally do NOT log the DOM elements.
+    // ========================================================
+
+    const safeDomElements =
+        Array.isArray(
+            sanitizeResponse.dom_elements
+        )
+            ? sanitizeResponse.dom_elements
+            : (
+                Array.isArray(
+                    prepareResponse.dom_elements
+                )
+                    ? prepareResponse.dom_elements
+                    : []
+            );
 
 
     // ========================================================
@@ -234,27 +516,31 @@ async function captureAndSanitize() {
 
     return {
 
-        success:
-            true,
+        success: true,
 
+        // Sanitized screenshot only.
         sanitizedImage:
             sanitizeResponse.sanitizedImage,
 
+        // Detection geometry only.
+        // No PII values.
         detections:
-            prepareResponse.detections || [],
+            safeDetections,
 
+        // Safe DOM metadata.
         dom_elements:
-            sanitizeResponse.dom_elements ||
-            prepareResponse.dom_elements ||
-            [],
+            safeDomElements,
 
         viewport:
             sanitizeResponse.viewport ||
             prepareResponse.viewport ||
             null,
 
+        // URL without query parameters or fragments.
         page_url:
-            tab.url || "",
+            getPrivacySafePageUrl(
+                tab.url
+            ),
 
         tab_id:
             tab.id,
@@ -269,7 +555,7 @@ async function captureAndSanitize() {
 // NORMALIZE AI ACTION
 // ============================================================
 //
-// The FAST planner returns:
+// FAST planner returns:
 //
 // {
 //     "action": "click",
@@ -278,10 +564,10 @@ async function captureAndSanitize() {
 //     "text": "",
 //     "amount": 0,
 //     "confidence": 0.98,
-//     "reason": "Matched Full Name..."
+//     "reason": "Matched Full Name"
 // }
 //
-// The content.js executor expects:
+// content.js expects:
 //
 // {
 //     "type": "click",
@@ -290,15 +576,10 @@ async function captureAndSanitize() {
 //         "y": 310
 //     }
 // }
-//
-// This function converts the new format into the format
-// expected by content.js.
-//
 // ============================================================
 
-function normalizeBrowserAction(
-    action
-) {
+function normalizeBrowserAction(action) {
+
 
     // ========================================================
     // INVALID ACTION
@@ -310,10 +591,8 @@ function normalizeBrowserAction(
     ) {
 
         console.warn(
-            "⚠️ Invalid AI action received:",
-            action
+            "[ACTION] Invalid AI action received."
         );
-
 
         return {
 
@@ -329,30 +608,15 @@ function normalizeBrowserAction(
     // ========================================================
     // ALREADY NORMALIZED
     // ========================================================
-    //
-    // If content.js format is already being used, don't
-    // modify it.
-    //
-    // Example:
-    //
-    // {
-    //     type: "click",
-    //     target: {
-    //         x: 604,
-    //         y: 310
-    //     }
-    // }
-    //
-    // ========================================================
 
     if (
         action.type
     ) {
 
         console.log(
-            "ℹ️ Action already uses content-script format."
+            "[ACTION] Action already normalized:",
+            getSafeActionLog(action)
         );
-
 
         return action;
     }
@@ -366,12 +630,12 @@ function normalizeBrowserAction(
         String(
             action.action || ""
         )
-        .toLowerCase()
-        .trim();
+            .toLowerCase()
+            .trim();
 
 
     console.log(
-        "🔍 AI action name:",
+        "[ACTION] Planner action:",
         actionName
     );
 
@@ -495,6 +759,9 @@ function normalizeBrowserAction(
                     y
             },
 
+            // IMPORTANT:
+            // The actual value is retained internally for execution.
+            // It is NEVER logged.
             value:
                 String(
                     value
@@ -635,8 +902,8 @@ function normalizeBrowserAction(
     // ========================================================
 
     console.error(
-        "❌ Unsupported AI action:",
-        action
+        "[ACTION] Unsupported AI action:",
+        actionName
     );
 
 
@@ -662,9 +929,20 @@ async function executeBrowserAction(
     action
 ) {
 
+    // ========================================================
+    // PRIVACY-SAFE ACTION LOG
+    // ========================================================
+    //
+    // DO NOT replace this with:
+    //
+    // console.log(action)
+    //
+    // because type actions may contain sensitive text.
+    // ========================================================
+
     console.log(
-        "🤖 AI action received:",
-        action
+        "[ACTION]",
+        getSafeActionLog(action)
     );
 
 
@@ -678,9 +956,15 @@ async function executeBrowserAction(
         );
 
 
+    // ========================================================
+    // SAFE NORMALIZED ACTION LOG
+    // ========================================================
+
     console.log(
-        "🔄 Normalized browser action:",
-        normalizedAction
+        "[ACTION] Normalized:",
+        getSafeActionLog(
+            normalizedAction
+        )
     );
 
 
@@ -749,7 +1033,7 @@ async function executeBrowserAction(
     try {
 
         console.log(
-            "📤 Sending normalized action to content script..."
+            "[ACTION] Sending action to content script."
         );
 
 
@@ -768,25 +1052,43 @@ async function executeBrowserAction(
     } catch (error) {
 
         console.error(
-            "❌ Action execution failed:",
-            error
+            "[ACTION] Action execution failed:",
+            error?.message || error
         );
-
 
         throw new Error(
             "Could not communicate with content script: " +
-            error.message
+            (error?.message || "Unknown error")
         );
     }
 
 
     // ========================================================
-    // LOG CONTENT SCRIPT RESULT
+    // LOG RESULT SAFELY
+    // ========================================================
+    //
+    // Do NOT dump the complete response object.
+    //
+    // A future content script response might contain sensitive
+    // information.
     // ========================================================
 
     console.log(
-        "✅ Content script action result:",
-        response
+        "[ACTION] Content script execution:",
+        {
+            success:
+                response?.success === true,
+
+            action:
+                response?.action ||
+                normalizedAction.type ||
+                "none",
+
+            error:
+                response?.error
+                    ? String(response.error)
+                    : undefined
+        }
     );
 
 
@@ -806,7 +1108,7 @@ chrome.runtime.onMessage.addListener(
     ) => {
 
         console.log(
-            "📨 Background message:",
+            "[MESSAGE]",
             message?.type
         );
 
@@ -826,7 +1128,7 @@ chrome.runtime.onMessage.addListener(
                     result => {
 
                         console.log(
-                            "✅ Capture + sanitize complete"
+                            "[CAPTURE] Capture + sanitize complete."
                         );
 
 
@@ -840,8 +1142,8 @@ chrome.runtime.onMessage.addListener(
                     error => {
 
                         console.error(
-                            "❌ Capture pipeline error:",
-                            error
+                            "[CAPTURE] Pipeline error:",
+                            error?.message || error
                         );
 
 
@@ -851,14 +1153,15 @@ chrome.runtime.onMessage.addListener(
                                 false,
 
                             error:
-                                error.message
+                                error?.message ||
+                                "Capture pipeline failed."
                         });
                     }
                 );
 
 
             // Keep the message channel open for
-            // the asynchronous response.
+            // asynchronous response.
 
             return true;
         }
@@ -874,8 +1177,10 @@ chrome.runtime.onMessage.addListener(
         ) {
 
             console.log(
-                "🎯 EXECUTE_BROWSER_ACTION received:",
-                message.action
+                "[ACTION] EXECUTE_BROWSER_ACTION received:",
+                getSafeActionLog(
+                    message.action
+                )
             );
 
 
@@ -887,8 +1192,11 @@ chrome.runtime.onMessage.addListener(
                     result => {
 
                         console.log(
-                            "🎉 Browser action completed:",
-                            result
+                            "[ACTION] Browser action completed:",
+                            {
+                                success:
+                                    result?.success !== false
+                            }
                         );
 
 
@@ -907,8 +1215,8 @@ chrome.runtime.onMessage.addListener(
                     error => {
 
                         console.error(
-                            "❌ Browser action error:",
-                            error
+                            "[ACTION] Browser action error:",
+                            error?.message || error
                         );
 
 
@@ -918,7 +1226,8 @@ chrome.runtime.onMessage.addListener(
                                 false,
 
                             error:
-                                error.message
+                                error?.message ||
+                                "Browser action failed."
                         });
                     }
                 );
@@ -935,7 +1244,7 @@ chrome.runtime.onMessage.addListener(
         // ====================================================
 
         console.warn(
-            "⚠️ Unknown background message:",
+            "[MESSAGE] Unknown background message:",
             message?.type
         );
 
