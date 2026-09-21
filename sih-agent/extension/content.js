@@ -53,7 +53,13 @@ const SIH_CONFIG = {
     maxWaitMs: 5000,
 
     // Maximum coordinate tolerance for browser viewport.
-    coordinateTolerance: 1
+    coordinateTolerance: 1,
+
+    // Sanitized screenshot transmission format.
+    // Set transmitWebP to false to always send PNG
+    // (WebP is still measured for the benchmark).
+    transmitWebP: true,
+    webpQuality: 0.82
 };
 
 
@@ -83,13 +89,214 @@ const PII_PATTERNS = {
         /(?<![+\d])\d{4}[\s-]?\d{4}[\s-]?\d{4}(?![\d\s-])/g,
 
     PAN:
-        /\b[A-Z]{5}\d{4}[A-Z]\b/gi,
+    /\b[A-Z]{5}\d{4}[A-Z]\b/gi,
 
     CREDIT_CARD:
         /\b(?:\d[ -]?){13,19}\b/g
 };
 
+// ============================================================
+// BENCHMARK METRICS
+// ============================================================
 
+// Extra margin (CSS px) painted around every detected PII region.
+// Covers anti-aliasing / sub-pixel scaling at the region edges.
+const REDACTION_PADDING = 3;
+
+function createEmptyBenchmarkMetrics() {
+    return {
+        piiDetectionLatencyMs: 0,
+        domPerceptionLatencyMs: 0,
+        redactionLatencyMs: 0,
+        verificationLatencyMs: 0,
+        actionExecutionLatencyMs: 0,
+
+        screenshotBeforeBytes: 0,
+
+        // Sanitized PNG benchmark
+        screenshotPngBytes: 0,
+
+        // Sanitized WebP benchmark
+        screenshotWebpBytes: 0,
+
+        // Final image actually selected for transmission
+        screenshotAfterBytes: 0,
+        screenshotFormat: "",
+
+        // Compression benchmark
+        // (compressionLatencyMs = PNG encode + WebP encode; both
+        //  run while benchmarking, so the individual encode times
+        //  are kept as well)
+        compressionLatencyMs: 0,
+        pngEncodeLatencyMs: 0,
+        webpEncodeLatencyMs: 0,
+        compressionRatio: 0,   // selected bytes / raw screenshot bytes
+
+        detectionCount: 0,
+        verificationRegions: 0,
+        verificationFailedRegions: 0,
+        verificationPassed: null   // null = not run yet
+    };
+}
+
+let benchmarkMetrics = createEmptyBenchmarkMetrics();
+
+function resetBenchmarkMetrics() {
+    benchmarkMetrics = createEmptyBenchmarkMetrics();
+}
+
+function getDataUrlByteSize(dataUrl) {
+    if (!dataUrl) {
+        return 0;
+    }
+
+    const commaIndex = dataUrl.indexOf(",");
+
+    if (commaIndex === -1) {
+        return 0;
+    }
+
+    const base64 = dataUrl.slice(
+        commaIndex + 1
+    );
+
+    return Math.floor(
+        base64.length * 3 / 4
+    );
+}
+
+// ============================================================
+// IMAGE COMPRESSION BENCHMARK
+// ============================================================
+//
+// Creates a WebP representation of the already-sanitized
+// canvas.
+//
+// IMPORTANT:
+// This function is called ONLY after redaction verification
+// has passed.
+//
+// The raw screenshot is never encoded here.
+//
+// canvas.toDataURL() silently falls back to PNG when a format is
+// unsupported, so the MIME type of the result is checked.
+// ============================================================
+
+function encodeSanitizedWebP(canvas) {
+
+    const compressionStart =
+        performance.now();
+
+    let webpDataUrl = "";
+
+    try {
+
+        webpDataUrl =
+            canvas.toDataURL(
+                "image/webp",
+                SIH_CONFIG.webpQuality
+            );
+
+    } catch (error) {
+
+        console.warn(
+            "[BENCHMARK] WebP encoding failed:",
+            error
+        );
+
+        return {
+            dataUrl: "",
+            bytes: 0,
+            latencyMs:
+                performance.now() -
+                compressionStart
+        };
+    }
+
+    const latencyMs =
+        performance.now() -
+        compressionStart;
+
+    if (
+        !String(webpDataUrl).startsWith(
+            "data:image/webp"
+        )
+    ) {
+
+        console.warn(
+            "[BENCHMARK] WebP not supported, PNG will be used"
+        );
+
+        return {
+            dataUrl: "",
+            bytes: 0,
+            latencyMs
+        };
+    }
+
+    return {
+        dataUrl: webpDataUrl,
+        bytes:
+            getDataUrlByteSize(
+                webpDataUrl
+            ),
+        latencyMs
+    };
+}
+
+// JS heap of this content-script context (Chrome only).
+// NOT total system RAM.
+function getJsHeapMetrics() {
+
+    const memory =
+        performance.memory;
+
+    if (!memory) {
+        return null;
+    }
+
+    return {
+        usedMB:
+            memory.usedJSHeapSize /
+            1024 /
+            1024,
+
+        totalMB:
+            memory.totalJSHeapSize /
+            1024 /
+            1024
+    };
+}
+
+// Only numbers / booleans - no PII can appear here.
+function getBenchmarkSnapshot() {
+
+    const m =
+        benchmarkMetrics;
+
+    // Encode cost of the format that was actually selected
+    // (both encoders run while benchmarking; only one would
+    // be needed in production).
+    const selectedEncodeMs =
+        m.screenshotFormat === "image/webp"
+            ? m.webpEncodeLatencyMs
+            : m.pngEncodeLatencyMs;
+
+    return {
+        ...m,
+
+        // Sum of the most recent local privacy-engine measurements.
+        totalLocalPrivacyMs:
+            m.piiDetectionLatencyMs +
+            m.domPerceptionLatencyMs +
+            m.redactionLatencyMs +
+            m.verificationLatencyMs +
+            selectedEncodeMs,
+
+        jsHeap:
+            getJsHeapMetrics()
+    };
+}
 // ============================================================
 // STATE
 // ============================================================
@@ -116,7 +323,63 @@ function normalizeText(text) {
         .trim();
 }
 
+function isValidPANCandidate(value) {
 
+    const pan =
+        String(value || "")
+            .trim()
+            .toUpperCase();
+
+    if (!/^[A-Z]{5}\d{4}[A-Z]$/.test(pan)) {
+        return false;
+    }
+
+    /*
+     * PAN structure:
+     *
+     * Characters 1–3: alphabetic
+     * Character 4: holder category
+     * Character 5: surname/name initial
+     * Characters 6–9: numeric
+     * Character 10: alphabetic
+     *
+     * Common holder categories:
+     *
+     * P = Individual
+     * C = Company
+     * H = HUF
+     * F = Firm / LLP
+     * A = Association of Persons
+     * T = Trust
+     * B = Body of Individuals
+     * L = Local Authority
+     * J = Artificial Juridical Person
+     * G = Government
+     */
+
+    const holderCategory =
+        pan.charAt(3);
+
+    const validCategories =
+        new Set([
+            "P",
+            "C",
+            "H",
+            "F",
+            "A",
+            "T",
+            "B",
+            "L",
+            "J",
+            "G"
+        ]);
+
+    if (!validCategories.has(holderCategory)) {
+        return false;
+    }
+
+    return true;
+}
 // ============================================================
 // VISIBILITY
 // ============================================================
@@ -436,18 +699,19 @@ function detectionAlreadyExists(
                 return false;
             }
 
-            if (
-                existing.value === value
-            ) {
-                return true;
-            }
-
+            // Without geometry we can only compare values.
             if (
                 !existing.rect ||
                 !rect
             ) {
-                return false;
+                return existing.value === value;
             }
+
+            /*
+             * Same value at a DIFFERENT position is a different
+             * on-screen occurrence and must be redacted too.
+             * Only a genuinely overlapping rectangle is a duplicate.
+             */
 
             const a =
                 existing.rect;
@@ -457,10 +721,10 @@ function detectionAlreadyExists(
 
             const overlap =
                 !(
-                    a.right < b.left ||
-                    a.left > b.right ||
-                    a.bottom < b.top ||
-                    a.top > b.bottom
+                    a.right <= b.left ||
+                    a.left >= b.right ||
+                    a.bottom <= b.top ||
+                    a.top >= b.bottom
                 );
 
             return overlap;
@@ -531,6 +795,147 @@ function addDetection(
 
 
 // ============================================================
+// TIGHT MATCH RECTANGLES
+// ============================================================
+//
+// Instead of redacting the whole parent element (e.g. an entire
+// paragraph), compute the rectangle of just the matched
+// characters using a DOM Range on the text node.
+//
+// PII regexes run on whitespace-normalized text, so we keep a
+// map from normalized index -> raw text-node offset.
+//
+// If anything looks inconsistent, we return null and the caller
+// falls back to the (larger, safer) parent element rectangle.
+// ============================================================
+
+function buildNormalizedOffsetMap(raw) {
+
+    let normalized = "";
+
+    const map = [];
+
+    let pendingSpaceAt = -1;
+
+    for (let i = 0; i < raw.length; i++) {
+
+        const ch = raw[i];
+
+        if (/\s/.test(ch)) {
+
+            if (
+                normalized.length > 0 &&
+                pendingSpaceAt === -1
+            ) {
+                pendingSpaceAt = i;
+            }
+
+            continue;
+        }
+
+        if (pendingSpaceAt !== -1) {
+
+            normalized += " ";
+            map.push(pendingSpaceAt);
+            pendingSpaceAt = -1;
+        }
+
+        normalized += ch;
+        map.push(i);
+    }
+
+    return { normalized, map };
+}
+
+function createTextRangeRectResolver(
+    textNode,
+    normalizedText
+) {
+
+    const raw =
+        textNode.textContent || "";
+
+    const { normalized, map } =
+        buildNormalizedOffsetMap(raw);
+
+    if (
+        normalized !== normalizedText ||
+        map.length !== normalizedText.length
+    ) {
+        return null;
+    }
+
+    return function resolve(start, end) {
+
+        try {
+
+            if (
+                start < 0 ||
+                end > map.length ||
+                end <= start
+            ) {
+                return null;
+            }
+
+            const range =
+                document.createRange();
+
+            range.setStart(
+                textNode,
+                map[start]
+            );
+
+            range.setEnd(
+                textNode,
+                map[end - 1] + 1
+            );
+
+            const rects =
+                Array.from(
+                    range.getClientRects()
+                ).filter(
+                    r =>
+                        r.width > 0 &&
+                        r.height > 0
+                );
+
+            if (rects.length === 0) {
+                return null;
+            }
+
+            // A match wrapped over several lines becomes the
+            // bounding box of all its line fragments
+            // (may over-redact, never under-redacts).
+            const left =
+                Math.min(...rects.map(r => r.left));
+
+            const top =
+                Math.min(...rects.map(r => r.top));
+
+            const right =
+                Math.max(...rects.map(r => r.right));
+
+            const bottom =
+                Math.max(...rects.map(r => r.bottom));
+
+            return {
+                left,
+                top,
+                right,
+                bottom,
+                width: right - left,
+                height: bottom - top
+            };
+
+        } catch (_) {
+
+            return null;
+        }
+    };
+}
+
+
+// ============================================================
 // REGEX PII DETECTION
 // ============================================================
 
@@ -538,7 +943,8 @@ function detectPIIPatterns(
     text,
     element,
     rect,
-    source = "text"
+    source = "text",
+    rectResolver = null
 ) {
 
     if (!text) {
@@ -549,6 +955,23 @@ function detectPIIPatterns(
         String(text);
 
     let match;
+
+    // Tight rectangle for a match, or the element rectangle
+    // when no resolver is available / it fails.
+    const rectFor =
+        (start, length) => {
+
+            if (!rectResolver) {
+                return rect;
+            }
+
+            return (
+                rectResolver(
+                    start,
+                    start + length
+                ) || rect
+            );
+        };
 
 
     // ========================================================
@@ -570,7 +993,7 @@ function detectPIIPatterns(
             "EMAIL",
             match[0],
             element,
-            rect,
+            rectFor(match.index, match[0].length),
             source
         );
     }
@@ -595,7 +1018,7 @@ function detectPIIPatterns(
             "PHONE",
             match[0],
             element,
-            rect,
+            rectFor(match.index, match[0].length),
             source
         );
     }
@@ -629,7 +1052,7 @@ function detectPIIPatterns(
                 "AADHAAR",
                 match[0],
                 element,
-                rect,
+                rectFor(match.index, match[0].length),
                 source
             );
         }
@@ -643,12 +1066,18 @@ function detectPIIPatterns(
     PII_PATTERNS.PAN.lastIndex = 0;
 
     while (
-        (
-            match =
-                PII_PATTERNS.PAN.exec(
-                    input
-                )
-        ) !== null
+    (
+        match =
+            PII_PATTERNS.PAN.exec(
+                input
+            )
+    ) !== null
+) {
+
+    if (
+        isValidPANCandidate(
+            match[0]
+        )
     ) {
 
         addDetection(
@@ -659,6 +1088,7 @@ function detectPIIPatterns(
             source
         );
     }
+}
 
 
     // ========================================================
@@ -686,7 +1116,7 @@ function detectPIIPatterns(
                 "CREDIT_CARD",
                 match[0],
                 element,
-                rect,
+                rectFor(match.index, match[0].length),
                 source
             );
         }
@@ -743,6 +1173,9 @@ function detectPasswordField(
 // ============================================================
 
 function detectDOMPII() {
+
+    const benchmarkStart =
+        performance.now();
 
     resetDetections();
 
@@ -817,11 +1250,18 @@ function detectDOMPII() {
         const rect =
             parent.getBoundingClientRect();
 
+        const rectResolver =
+            createTextRangeRectResolver(
+                textNode,
+                text
+            );
+
         detectPIIPatterns(
             text,
             parent,
             rect,
-            "text"
+            "text",
+            rectResolver
         );
     }
 
@@ -875,6 +1315,19 @@ function detectDOMPII() {
         }
     );
 
+
+    benchmarkMetrics.piiDetectionLatencyMs =
+        performance.now() -
+        benchmarkStart;
+
+    benchmarkMetrics.detectionCount =
+        detections.length;
+
+    console.log(
+        "[BENCHMARK] PII detection latency:",
+        benchmarkMetrics.piiDetectionLatencyMs.toFixed(2),
+        "ms"
+    );
 
     console.log(
     "[PRIVACY] Local PII detection completed:",
@@ -999,6 +1452,27 @@ function getSerializableDetections() {
 // ============================================================
 
 function collectSafeDOM() {
+
+    const start =
+        performance.now();
+
+    const result =
+        collectSafeDOMUntimed();
+
+    benchmarkMetrics.domPerceptionLatencyMs =
+        performance.now() -
+        start;
+
+    console.log(
+        "[BENCHMARK] DOM perception latency:",
+        benchmarkMetrics.domPerceptionLatencyMs.toFixed(2),
+        "ms"
+    );
+
+    return result;
+}
+
+function collectSafeDOMUntimed() {
 
     const elements = [];
 
@@ -1685,6 +2159,161 @@ function runPrivacyEngine() {
 
 
 // ============================================================
+// REDACTION GEOMETRY + VERIFICATION
+// ============================================================
+//
+// Regions are converted to INTEGER device pixels, rounded
+// outward (floor / ceil). Fractional fillRect() coordinates are
+// anti-aliased, which can leave partially visible PII pixels
+// at the edges.
+//
+//   core  = the detected PII rectangle (must be fully black)
+//   paint = core + REDACTION_PADDING safety margin
+// ============================================================
+
+function toCanvasRegions(
+    rect,
+    viewportWidth,
+    viewportHeight,
+    scaleX,
+    scaleY,
+    canvasWidth,
+    canvasHeight,
+    paddingCss
+) {
+
+    const values = [
+        rect.left,
+        rect.top,
+        rect.right,
+        rect.bottom
+    ];
+
+    if (
+        !values.every(
+            v => Number.isFinite(v)
+        )
+    ) {
+        return { invalid: true };
+    }
+
+    // Completely outside the captured viewport: nothing to paint.
+    if (
+        rect.right <= 0 ||
+        rect.bottom <= 0 ||
+        rect.left >= viewportWidth ||
+        rect.top >= viewportHeight
+    ) {
+        return { outside: true };
+    }
+
+    const clamp =
+        (v, max) =>
+            Math.min(
+                Math.max(v, 0),
+                max
+            );
+
+    const build =
+        pad => {
+
+            const x0 =
+                clamp(
+                    Math.floor(
+                        (rect.left - pad) *
+                        scaleX
+                    ),
+                    canvasWidth
+                );
+
+            const y0 =
+                clamp(
+                    Math.floor(
+                        (rect.top - pad) *
+                        scaleY
+                    ),
+                    canvasHeight
+                );
+
+            const x1 =
+                clamp(
+                    Math.ceil(
+                        (rect.right + pad) *
+                        scaleX
+                    ),
+                    canvasWidth
+                );
+
+            const y1 =
+                clamp(
+                    Math.ceil(
+                        (rect.bottom + pad) *
+                        scaleY
+                    ),
+                    canvasHeight
+                );
+
+            return {
+                x: x0,
+                y: y0,
+                width: Math.max(1, x1 - x0),
+                height: Math.max(1, y1 - y0)
+            };
+        };
+
+    return {
+        core: build(0),
+        paint: build(paddingCss)
+    };
+}
+
+// Returns how many core regions still contain non-black pixels.
+function countUnredactedRegions(
+    context,
+    coreRegions
+) {
+
+    let failed = 0;
+
+    for (const region of coreRegions) {
+
+        const { data } =
+            context.getImageData(
+                region.x,
+                region.y,
+                region.width,
+                region.height
+            );
+
+        let ok = true;
+
+        for (
+            let i = 0;
+            i < data.length;
+            i += 4
+        ) {
+
+            if (
+                data[i] > 8 ||
+                data[i + 1] > 8 ||
+                data[i + 2] > 8 ||
+                data[i + 3] !== 255
+            ) {
+                ok = false;
+                break;
+            }
+        }
+
+        if (!ok) {
+            failed++;
+        }
+    }
+
+    return failed;
+}
+
+
+// ============================================================
 // SCREENSHOT SANITIZATION
 // ============================================================
 //
@@ -1702,6 +2331,14 @@ function sanitizeScreenshot(
     screenshot,
     detectionList
 ) {
+
+    const benchmarkStart =
+        performance.now();
+
+    benchmarkMetrics.screenshotBeforeBytes =
+        getDataUrlByteSize(
+            screenshot
+        );
 
     return new Promise(
         (
@@ -1807,115 +2444,328 @@ function sanitizeScreenshot(
                                 viewportHeight;
 
 
-                            detectionList.forEach(
+                            const paintRegions = [];
+
+                            const coreRegions = [];
+
+                            let unredactableCount = 0;
+
+
+                            (detectionList || []).forEach(
                                 detection => {
 
-                                    if (
-                                        !detection ||
-                                        !detection.rect
-                                    ) {
+                                    if (!detection) {
                                         return;
                                     }
 
+                                    // A detection without geometry can
+                                    // never be redacted -> fail closed.
+                                    if (!detection.rect) {
 
-                                    const rect =
-                                        detection.rect;
+                                        unredactableCount++;
 
-
-                                    /*
-                                     * Ignore detections that are
-                                     * completely outside the current
-                                     * viewport.
-                                     */
-
-                                    if (
-                                        rect.right <= 0 ||
-                                        rect.bottom <= 0 ||
-                                        rect.left >= viewportWidth ||
-                                        rect.top >= viewportHeight
-                                    ) {
                                         return;
                                     }
 
-
-                                    const clippedLeft =
-                                        Math.max(
-                                            0,
-                                            rect.left
-                                        );
-
-                                    const clippedTop =
-                                        Math.max(
-                                            0,
-                                            rect.top
-                                        );
-
-                                    const clippedRight =
-                                        Math.min(
+                                    const regions =
+                                        toCanvasRegions(
+                                            detection.rect,
                                             viewportWidth,
-                                            rect.right
-                                        );
-
-                                    const clippedBottom =
-                                        Math.min(
                                             viewportHeight,
-                                            rect.bottom
+                                            scaleX,
+                                            scaleY,
+                                            canvas.width,
+                                            canvas.height,
+                                            REDACTION_PADDING
                                         );
 
+                                    if (regions.invalid) {
 
-                                    const x =
-                                        Math.max(
-                                            0,
-                                            clippedLeft *
-                                            scaleX
-                                        );
+                                        unredactableCount++;
 
-                                    const y =
-                                        Math.max(
-                                            0,
-                                            clippedTop *
-                                            scaleY
-                                        );
+                                        return;
+                                    }
 
-                                    const width =
-                                        Math.max(
-                                            1,
-                                            (
-                                                clippedRight -
-                                                clippedLeft
-                                            ) *
-                                            scaleX
-                                        );
+                                    if (regions.outside) {
+                                        return;
+                                    }
 
-                                    const height =
-                                        Math.max(
-                                            1,
-                                            (
-                                                clippedBottom -
-                                                clippedTop
-                                            ) *
-                                            scaleY
-                                        );
+                                    paintRegions.push(
+                                        regions.paint
+                                    );
 
-
-                                    context.fillStyle =
-                                        "#000000";
-
-
-                                    context.fillRect(
-                                        x,
-                                        y,
-                                        width,
-                                        height
+                                    coreRegions.push(
+                                        regions.core
                                     );
                                 }
                             );
 
 
-                            resolve(
+                            context.fillStyle =
+                                "#000000";
+
+                            paintRegions.forEach(
+                                region => {
+
+                                    context.fillRect(
+                                        region.x,
+                                        region.y,
+                                        region.width,
+                                        region.height
+                                    );
+                                }
+                            );
+
+
+                            // ====================================
+                            // VERIFY REDACTION
+                            // ====================================
+
+                            // Force any pending canvas drawing to finish
+                            // first, so that time is counted as redaction
+                            // and not as verification.
+                            context.getImageData(
+                                0,
+                                0,
+                                1,
+                                1
+                            );
+
+                            const verifyStart =
+                                performance.now();
+
+                            const failedRegions =
+                                countUnredactedRegions(
+                                    context,
+                                    coreRegions
+                                ) + unredactableCount;
+
+                            benchmarkMetrics.verificationLatencyMs =
+                                performance.now() -
+                                verifyStart;
+
+                            benchmarkMetrics.verificationRegions =
+                                coreRegions.length +
+                                unredactableCount;
+
+                            benchmarkMetrics.verificationFailedRegions =
+                                failedRegions;
+
+                            benchmarkMetrics.verificationPassed =
+                                failedRegions === 0;
+
+                            console.log(
+                                "[BENCHMARK] Redaction verification:",
+                                benchmarkMetrics.verificationPassed
+                                    ? "PASS"
+                                    : "FAIL",
+                                `(${benchmarkMetrics.verificationRegions} regions,`,
+                                `${failedRegions} failed,`,
+                                `${benchmarkMetrics.verificationLatencyMs.toFixed(2)} ms)`
+                            );
+
+                            if (failedRegions > 0) {
+
+                                // Nothing is returned -> nothing can
+                                // be transmitted.
+                                reject(
+                                    new Error(
+                                        "Redaction verification failed: " +
+                                        failedRegions +
+                                        " region(s) not fully redacted"
+                                    )
+                                );
+
+                                return;
+                            }
+
+
+                            // ====================================
+                            // IMAGE FORMAT BENCHMARK
+                            // ====================================
+                            //
+                            // Redaction has already passed
+                            // verification above.
+                            //
+                            // Both PNG and WebP are measured. WebP is
+                            // selected for transmission only when it
+                            // is valid, smaller than PNG and enabled.
+
+                            const pngBenchmarkStart =
+                                performance.now();
+
+                            const sanitizedPng =
                                 canvas.toDataURL(
                                     "image/png"
+                                );
+
+                            const pngEncodingLatencyMs =
+                                performance.now() -
+                                pngBenchmarkStart;
+
+                            const pngBytes =
+                                getDataUrlByteSize(
+                                    sanitizedPng
+                                );
+
+                            benchmarkMetrics.screenshotPngBytes =
+                                pngBytes;
+
+                            const webpResult =
+                                encodeSanitizedWebP(
+                                    canvas
+                                );
+
+                            benchmarkMetrics.screenshotWebpBytes =
+                                webpResult.bytes;
+
+
+                            // ------------------------------------
+                            // SELECT TRANSMISSION FORMAT
+                            // ------------------------------------
+
+                            let sanitizedScreenshot = "";
+                            let selectedFormat = "";
+                            let selectedBytes = 0;
+
+                            if (
+                                SIH_CONFIG.transmitWebP &&
+                                webpResult.dataUrl &&
+                                webpResult.bytes > 0 &&
+                                webpResult.bytes < pngBytes
+                            ) {
+
+                                sanitizedScreenshot =
+                                    webpResult.dataUrl;
+
+                                selectedFormat =
+                                    "image/webp";
+
+                                selectedBytes =
+                                    webpResult.bytes;
+
+                            } else {
+
+                                sanitizedScreenshot =
+                                    sanitizedPng;
+
+                                selectedFormat =
+                                    "image/png";
+
+                                selectedBytes =
+                                    pngBytes;
+                            }
+
+                            benchmarkMetrics.screenshotAfterBytes =
+                                selectedBytes;
+
+                            benchmarkMetrics.screenshotFormat =
+                                selectedFormat;
+
+                            benchmarkMetrics.pngEncodeLatencyMs =
+                                pngEncodingLatencyMs;
+
+                            benchmarkMetrics.webpEncodeLatencyMs =
+                                webpResult.latencyMs;
+
+                            benchmarkMetrics.compressionLatencyMs =
+                                pngEncodingLatencyMs +
+                                webpResult.latencyMs;
+
+
+                            // ------------------------------------
+                            // COMPRESSION RATIO
+                            // (selected image / raw screenshot)
+                            // ------------------------------------
+
+                            benchmarkMetrics.compressionRatio =
+                                (
+                                    benchmarkMetrics.screenshotBeforeBytes > 0 &&
+                                    selectedBytes > 0
                                 )
+                                    ? selectedBytes /
+                                      benchmarkMetrics.screenshotBeforeBytes
+                                    : 0;
+
+
+                            // ------------------------------------
+                            // BENCHMARK LOGGING
+                            // ------------------------------------
+
+                            console.log(
+                                "[BENCHMARK] PNG size:",
+                                (pngBytes / 1024).toFixed(2),
+                                "KB"
+                            );
+
+                            console.log(
+                                "[BENCHMARK] WebP size:",
+                                (webpResult.bytes / 1024).toFixed(2),
+                                "KB"
+                            );
+
+                            console.log(
+                                "[BENCHMARK] Selected format:",
+                                selectedFormat
+                            );
+
+                            console.log(
+                                "[BENCHMARK] Selected size:",
+                                (selectedBytes / 1024).toFixed(2),
+                                "KB"
+                            );
+
+                            console.log(
+                                "[BENCHMARK] Compression latency:",
+                                benchmarkMetrics.compressionLatencyMs.toFixed(2),
+                                "ms",
+                                `(PNG ${pngEncodingLatencyMs.toFixed(2)} ms,`,
+                                `WebP ${webpResult.latencyMs.toFixed(2)} ms)`
+                            );
+
+                            console.log(
+                                "[BENCHMARK] Compression ratio:",
+                                benchmarkMetrics.compressionRatio.toFixed(4)
+                            );
+
+
+                            // Redaction latency = painting only:
+                            // verification and compression are
+                            // reported separately.
+                            benchmarkMetrics.redactionLatencyMs =
+                                (
+                                    performance.now() -
+                                    benchmarkStart
+                                ) -
+                                benchmarkMetrics.verificationLatencyMs -
+                                benchmarkMetrics.compressionLatencyMs;
+
+                            console.log(
+                                "[BENCHMARK] Redaction latency:",
+                                benchmarkMetrics.redactionLatencyMs.toFixed(2),
+                                "ms"
+                            );
+
+                            console.log(
+                                "[BENCHMARK] Screenshot before:",
+                                (
+                                    benchmarkMetrics.screenshotBeforeBytes /
+                                    1024
+                                ).toFixed(2),
+                                "KB"
+                            );
+
+                            console.log(
+                                "[BENCHMARK] Screenshot after:",
+                                (
+                                    benchmarkMetrics.screenshotAfterBytes /
+                                    1024
+                                ).toFixed(2),
+                                "KB"
+                            );
+
+                            resolve(
+                                sanitizedScreenshot
                             );
 
                         } catch (error) {
@@ -4233,6 +5083,26 @@ chrome.runtime.onMessage.addListener(
 
 
         // ====================================================
+        // GET BENCHMARK METRICS
+        // ====================================================
+
+        if (
+            message?.type ===
+            "GET_BENCHMARK_METRICS"
+        ) {
+
+            sendResponse({
+                success: true,
+                metrics:
+                    getBenchmarkSnapshot()
+            });
+
+
+            return true;
+        }
+
+
+        // ====================================================
         // PREPARE CAPTURE
         // ====================================================
 
@@ -4412,10 +5282,23 @@ chrome.runtime.onMessage.addListener(
             "EXECUTE_ACTION"
         ) {
 
+            const actionStart =
+                performance.now();
+
             const result =
                 executeBrowserAction(
                     message.action
                 );
+
+            benchmarkMetrics.actionExecutionLatencyMs =
+                performance.now() -
+                actionStart;
+
+            console.log(
+                "[BENCHMARK] Action execution latency:",
+                benchmarkMetrics.actionExecutionLatencyMs.toFixed(2),
+                "ms"
+            );
 
 
             console.log(

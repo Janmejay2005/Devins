@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>SIH PII Accuracy Benchmark</title>
+
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            padding: 40px;
+            font-family: Arial, sans-serif;
+            background: #f4f6f8;
+            color: #1f2937;
+        }
+
+        .container {
+            max-width: 900px;
+            margin: auto;
+            background: white;
+            padding: 32px;
+            border-radius: 12px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+        }
+
+        h1 {
+            margin-top: 0;
+            font-size: 28px;
+        }
+
+        .subtitle {
+            color: #6b7280;
+            margin-bottom: 30px;
+        }
+
+        .section {
+            margin-top: 28px;
+            padding: 20px;
+            border: 1px solid #e5e7eb;
+            border-radius: 10px;
+        }
+
+        .section h2 {
+            margin-top: 0;
+            font-size: 20px;
+        }
+
+        .field {
+            margin: 16px 0;
+        }
+
+        label {
+            display: block;
+            font-weight: 600;
+            margin-bottom: 6px;
+        }
+
+        input {
+            width: 100%;
+            padding: 11px 12px;
+            border: 1px solid #d1d5db;
+            border-radius: 7px;
+            font-size: 15px;
+        }
+
+        .value {
+            padding: 12px;
+            background: #f9fafb;
+            border-radius: 7px;
+            font-family: monospace;
+            word-break: break-word;
+        }
+
+        .ground-truth {
+            border-left: 4px solid #2563eb;
+        }
+
+        .lookalike {
+            border-left: 4px solid #6b7280;
+        }
+
+        .note {
+            margin-top: 25px;
+            padding: 14px;
+            background: #fff7ed;
+            border-radius: 7px;
+            color: #9a3412;
+        }
+    </style>
+</head>
+
+<body>
+
+<div class="container">
+
+    <h1>SIH Privacy Agent — PII Accuracy Benchmark</h1>
+
+    <p class="subtitle">
+        Controlled test page for measuring local PII detection precision,
+        recall and F1-score.
+    </p>
+
+
+    <!-- ===================================================== -->
+    <!-- TRUE POSITIVES / GROUND TRUTH -->
+    <!-- ===================================================== -->
+
+    <div class="section ground-truth">
+
+        <h2>Ground Truth — Actual PII</h2>
+
+        <div class="field">
+            <label>Full Name</label>
+            <div class="value">
+                Rahul Sharma
+            </div>
+        </div>
+
+        <div class="field">
+            <label>Email</label>
+            <div class="value">
+                rahul.sharma@example.com
+            </div>
+        </div>
+
+        <div class="field">
+            <label>Phone</label>
+            <div class="value">
+                +919876543210
+            </div>
+        </div>
+
+        <div class="field">
+            <label>Aadhaar</label>
+            <div class="value">
+                2345 6789 0123
+            </div>
+        </div>
+
+        <div class="field">
+            <label>PAN</label>
+            <div class="value">
+                ABCPD1234F
+            </div>
+        </div>
+
+        <div class="field">
+            <label>Card Number</label>
+            <div class="value">
+                4111 1111 1111 1111
+            </div>
+        </div>
+
+        <div class="field">
+            <label>Password</label>
+            <input
+                type="password"
+                value="SecretPassword123"
+            >
+        </div>
+
+    </div>
+
+
+    <!-- ===================================================== -->
+    <!-- NON-PII LOOKALIKE VALUES -->
+    <!-- ===================================================== -->
+
+    <div class="section lookalike">
+
+        <h2>Negative Samples — Non-PII Lookalikes</h2>
+
+        <div class="field">
+            <label>Order Number</label>
+            <div class="value">
+                1234567890
+            </div>
+        </div>
+
+        <div class="field">
+            <label>Product Code</label>
+            <div class="value">
+                ABCDE1234G
+            </div>
+        </div>
+
+        <div class="field">
+            <label>Reference Number</label>
+            <div class="value">
+                1234 5678 9012 3456
+            </div>
+        </div>
+
+        <div class="field">
+            <label>Normal Text</label>
+            <div class="value">
+                This is ordinary text and contains no sensitive information.
+            </div>
+        </div>
+
+        <div class="field">
+            <label>Contact Description</label>
+            <div class="value">
+                Contact support during normal business hours.
+            </div>
+        </div>
+
+        <div class="field">
+            <label>Account Label</label>
+            <div class="value">
+                USER_ACCOUNT_REFERENCE
+            </div>
+        </div>
+
+    </div>
+
+
+    <div class="note">
+        This page is used only for controlled benchmarking.
+        The values are synthetic test data and must not be treated
+        as real personal information.
+    </div>
+
+</div>
+
+</body>
+</html>
