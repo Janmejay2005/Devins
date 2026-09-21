@@ -1,409 +1,1154 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
-
     <meta charset="UTF-8">
 
     <meta
         name="viewport"
-        content="width=device-width, initial-scale=1.0">
+        content="width=device-width, initial-scale=1.0"
+    >
 
-    <title>SIH Privacy Agent</title>
+    <title>Devins — Privacy Browser Agent</title>
 
     <style>
+        /* =========================================================
+           DEVINS — PRIVACY BROWSER AGENT
+           Human-designed extension interface
+           ========================================================= */
 
         * {
             box-sizing: border-box;
         }
 
+        :root {
+            --bg: #f7f8f6;
+            --surface: #ffffff;
+            --surface-soft: #f3f6f3;
+
+            --ink: #101827;
+            --muted: #667085;
+            --muted-2: #8a94a6;
+
+            --border: #e2e7e3;
+            --border-dark: #d5ddd8;
+
+            --green: #087f5b;
+            --green-dark: #075c43;
+            --green-soft: #eaf7f1;
+
+            --blue: #2563eb;
+            --blue-soft: #eff6ff;
+
+            --red: #dc2626;
+            --red-soft: #fef2f2;
+
+            --shadow:
+                0 2px 8px rgba(15, 23, 42, 0.04),
+                0 10px 30px rgba(15, 23, 42, 0.035);
+
+            --radius: 16px;
+        }
+
+        html {
+            width: 100%;
+            min-width: 720px;
+        }
+
         body {
+            width: 760px;
+            min-height: 600px;
+            max-height: 760px;
 
             margin: 0;
 
-            padding: 0;
-
-            width: 470px;
-
-            min-height: 600px;
+            background: var(--bg);
+            color: var(--ink);
 
             font-family:
+                Inter,
+                ui-sans-serif,
+                -apple-system,
+                BlinkMacSystemFont,
+                "Segoe UI",
+                Roboto,
                 Arial,
-                Helvetica,
                 sans-serif;
 
-            background: #ffffff;
+            overflow-y: auto;
+            overflow-x: hidden;
 
-            color: #111111;
+            -webkit-font-smoothing: antialiased;
         }
 
+        button,
+        textarea {
+            font: inherit;
+        }
 
-        /* =====================================================
-           HEADER
-           ===================================================== */
+        button {
+            -webkit-tap-highlight-color: transparent;
+        }
 
-        .header {
+        /* =========================================================
+           SCROLLBAR
+           ========================================================= */
+
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: #cfd7d2;
+            border-radius: 20px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: #b8c3bd;
+        }
+
+        /* =========================================================
+           TOP BAR
+           ========================================================= */
+
+        .topbar {
+            height: 78px;
+
+            padding: 16px 22px;
 
             display: flex;
-
             align-items: center;
+            justify-content: space-between;
 
-            gap: 10px;
+            background: rgba(255, 255, 255, 0.96);
 
-            padding: 14px 18px;
+            border-bottom: 1px solid var(--border);
 
-            font-size: 21px;
+            position: sticky;
+            top: 0;
+            z-index: 20;
 
-            font-weight: 700;
-
-            border-bottom: 1px solid #dddddd;
+            backdrop-filter: blur(12px);
         }
 
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 11px;
+        }
 
-        /* =====================================================
-           PRIVACY STATUS
-           ===================================================== */
+        /* Curved Devins D */
 
-        .status {
+        .devins-mark {
+            width: 38px;
+            height: 38px;
 
-            margin: 14px 18px;
+            position: relative;
 
-            padding: 15px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
 
-            border: 1px solid #10b981;
+            flex-shrink: 0;
+        }
+
+        .devins-mark::before {
+            content: "";
+
+            width: 31px;
+            height: 31px;
+
+            border: 8px solid #0b1828;
+            border-left-color: transparent;
+
+            border-radius: 5px 18px 18px 5px;
+
+            transform: skewY(-1deg);
+
+            position: absolute;
+        }
+
+        .devins-mark::after {
+            content: "";
+
+            width: 8px;
+            height: 26px;
+
+            background:
+                linear-gradient(
+                    180deg,
+                    #20a477 0%,
+                    #087f5b 100%
+                );
+
+            border-radius: 7px 2px 2px 7px;
+
+            position: absolute;
+            left: 5px;
+            top: 6px;
+
+            transform: skewY(-18deg);
+        }
+
+        .brand-name {
+            font-size: 23px;
+            line-height: 1;
+
+            font-weight: 750;
+            letter-spacing: -0.7px;
+        }
+
+        .brand-subtitle {
+            margin-top: 4px;
+
+            font-size: 11px;
+
+            color: var(--muted);
+
+            letter-spacing: 0.15px;
+        }
+
+        .protection-status {
+            display: flex;
+            align-items: center;
+            gap: 9px;
+
+            padding: 8px 12px;
+
+            border: 1px solid #cce8da;
+
+            background: var(--green-soft);
 
             border-radius: 12px;
-
-            background: #ecfdf5;
-
-            color: #065f46;
-
-            font-weight: 600;
-
-            font-size: 15px;
         }
 
+        .status-dot {
+            width: 9px;
+            height: 9px;
 
-        /* =====================================================
-           TASK SECTION
-           ===================================================== */
+            border-radius: 50%;
 
-        .task-section {
+            background: #0c9a68;
 
-            margin: 0 18px 14px 18px;
+            box-shadow:
+                0 0 0 4px rgba(12, 154, 104, 0.08);
         }
 
-
-        .task-label {
-
+        .status-copy strong {
             display: block;
 
-            margin-bottom: 7px;
-
-            font-size: 15px;
-
+            font-size: 12px;
             font-weight: 700;
+
+            color: var(--green-dark);
         }
 
+        .status-copy span {
+            display: block;
+
+            margin-top: 2px;
+
+            font-size: 10px;
+
+            color: #4c7768;
+        }
+
+        /* =========================================================
+           PAGE
+           ========================================================= */
+
+        .page {
+            padding: 18px 20px 26px;
+        }
+
+        /* =========================================================
+           HERO / TASK CARD
+           ========================================================= */
+
+        .task-card {
+            background: var(--surface);
+
+            border: 1px solid var(--border);
+
+            border-radius: 18px;
+
+            padding: 20px;
+
+            box-shadow: var(--shadow);
+        }
+
+        .eyebrow {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+
+            color: var(--green);
+
+            font-size: 11px;
+            font-weight: 750;
+
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+        }
+
+        .eyebrow-line {
+            width: 22px;
+            height: 2px;
+
+            background: var(--green);
+
+            border-radius: 10px;
+        }
+
+        .task-title {
+            margin: 9px 0 5px;
+
+            font-size: 24px;
+            line-height: 1.15;
+
+            font-weight: 750;
+
+            letter-spacing: -0.7px;
+        }
+
+        .task-description {
+            margin: 0 0 16px;
+
+            color: var(--muted);
+
+            font-size: 13px;
+            line-height: 1.5;
+        }
+
+        .task-editor {
+            position: relative;
+        }
 
         .task-input {
-
             width: 100%;
 
-            min-height: 78px;
-
-            padding: 12px;
+            min-height: 92px;
 
             resize: vertical;
 
-            border: 1px solid #cbd5e1;
+            padding: 14px 15px 27px;
 
-            border-radius: 10px;
-
-            outline: none;
-
-            font-family:
-                Arial,
-                Helvetica,
-                sans-serif;
-
-            font-size: 14px;
-
-            line-height: 1.45;
-
-            color: #111111;
-
-            background: #ffffff;
-        }
-
-
-        .task-input:focus {
-
-            border-color: #223f67;
-
-            box-shadow:
-                0 0 0 2px
-                rgba(34, 63, 103, 0.10);
-        }
-
-
-        .task-help {
-
-            margin-top: 6px;
-
-            font-size: 12px;
-
-            color: #666666;
-
-            line-height: 1.4;
-        }
-
-
-        /* =====================================================
-           QUICK TASKS
-           ===================================================== */
-
-        .quick-tasks {
-
-            display: flex;
-
-            flex-wrap: wrap;
-
-            gap: 7px;
-
-            margin-top: 10px;
-        }
-
-
-        .quick-task {
-
-            padding: 7px 10px;
-
-            border: 1px solid #d1d5db;
-
-            border-radius: 8px;
-
-            background: #f8fafc;
-
-            color: #334155;
-
-            font-size: 12px;
-
-            cursor: pointer;
-        }
-
-
-        .quick-task:hover {
-
-            background: #eef2f7;
-        }
-
-
-        /* =====================================================
-           EXECUTE BUTTON
-           ===================================================== */
-
-        .capture-button {
-
-            display: block;
-
-            width: calc(100% - 36px);
-
-            margin: 18px;
-
-            padding: 16px;
-
-            border: none;
+            border: 1px solid #ccd5cf;
 
             border-radius: 12px;
 
-            background: #223f67;
+            outline: none;
 
-            color: white;
+            background: #fcfdfc;
 
-            font-size: 17px;
+            color: var(--ink);
 
-            font-weight: 700;
+            font-size: 14px;
+            line-height: 1.5;
+
+            transition:
+                border-color 0.15s ease,
+                box-shadow 0.15s ease,
+                background 0.15s ease;
+        }
+
+        .task-input:hover {
+            border-color: #b8c4bd;
+        }
+
+        .task-input:focus {
+            border-color: #76ad98;
+
+            background: #ffffff;
+
+            box-shadow:
+                0 0 0 3px
+                rgba(8, 127, 91, 0.08);
+        }
+
+        .task-counter {
+            position: absolute;
+
+            right: 12px;
+            bottom: 8px;
+
+            font-size: 10px;
+
+            color: var(--muted-2);
+
+            pointer-events: none;
+        }
+
+        .task-footer {
+            margin-top: 12px;
+
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+
+            gap: 12px;
+        }
+
+        .task-hint {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+
+            color: var(--muted);
+
+            font-size: 11px;
+        }
+
+        .shield-mini {
+            width: 18px;
+            height: 18px;
+
+            display: grid;
+            place-items: center;
+
+            color: var(--green);
+
+            background: var(--green-soft);
+
+            border-radius: 6px;
+
+            font-size: 10px;
+            font-weight: 800;
+        }
+
+        /* =========================================================
+           RUN BUTTON
+           ========================================================= */
+
+        .capture-button {
+            min-width: 168px;
+
+            padding: 12px 18px;
+
+            border: 0;
+
+            border-radius: 10px;
+
+            background:
+                linear-gradient(
+                    135deg,
+                    #087f5b,
+                    #096b50
+                );
+
+            color: #ffffff;
+
+            font-size: 13px;
+            font-weight: 750;
+
+            cursor: pointer;
+
+            box-shadow:
+                0 4px 10px
+                rgba(8, 127, 91, 0.16);
+
+            transition:
+                transform 0.12s ease,
+                box-shadow 0.15s ease,
+                filter 0.15s ease;
+        }
+
+        .capture-button:hover {
+            filter: brightness(1.035);
+
+            box-shadow:
+                0 6px 14px
+                rgba(8, 127, 91, 0.20);
+        }
+
+        .capture-button:active {
+            transform: translateY(1px);
+        }
+
+        .capture-button:disabled {
+            cursor: wait;
+
+            filter: grayscale(0.15);
+
+            opacity: 0.75;
+        }
+
+        /* =========================================================
+           EXAMPLES
+           ========================================================= */
+
+        .examples {
+            margin-top: 13px;
+
+            display: flex;
+            align-items: center;
+            gap: 7px;
+
+            flex-wrap: wrap;
+        }
+
+        .examples-label {
+            margin-right: 2px;
+
+            color: var(--muted);
+
+            font-size: 10px;
+            font-weight: 650;
+        }
+
+        .quick-task {
+            padding: 7px 10px;
+
+            border: 1px solid #dfe5e1;
+
+            border-radius: 8px;
+
+            background: #fafcfb;
+
+            color: #354052;
+
+            font-size: 10px;
 
             cursor: pointer;
 
             transition:
-                background 0.2s,
-                transform 0.1s;
+                background 0.15s ease,
+                border-color 0.15s ease,
+                transform 0.1s ease;
         }
 
+        .quick-task:hover {
+            background: #f1f7f4;
 
-        .capture-button:hover {
-
-            background: #1a3150;
+            border-color: #c8dcd2;
         }
 
-
-        .capture-button:active {
-
-            transform: scale(0.99);
+        .quick-task:active {
+            transform: translateY(1px);
         }
 
+        /* =========================================================
+           PRIVACY STRIP
+           ========================================================= */
 
-        .capture-button:disabled {
-
-            background: #8a99aa;
-
-            cursor: wait;
-        }
-
-
-        /* =====================================================
-           RESULT
-           ===================================================== */
-
-        .result {
-
-            margin:
-                0
-                18px
-                18px
-                18px;
-
-            font-size: 15px;
-
-            line-height: 1.5;
-        }
-
-
-        .result-title {
-
-            font-size: 17px;
-
-            font-weight: 700;
-
-            margin-bottom: 14px;
-        }
-
-
-        .row {
-
-            margin: 6px 0;
-        }
-
-
-        .label {
-
-            font-weight: 700;
-        }
-
-
-        .success {
-
-            color: #087f3e;
-
-            font-weight: 600;
-        }
-
-
-        .error {
-
-            color: #b91c1c;
-
-            font-weight: 600;
-        }
-
-
-        .privacy-badge {
-
-            display: inline-block;
-
-            margin-top: 4px;
-
-            padding: 4px 8px;
-
-            border-radius: 6px;
-
-            background: #ecfdf5;
-
-            color: #065f46;
-
-            font-size: 12px;
-
-            font-weight: 700;
-        }
-
-
-        /* =====================================================
-           IMAGE PREVIEW
-           ===================================================== */
-
-        .preview {
-
-            display: block;
-
-            width: 100%;
-
-            max-height: 500px;
-
-            object-fit: contain;
-
-            border: 1px solid #cccccc;
-
-            border-radius: 8px;
-
+        .privacy-strip {
             margin-top: 14px;
 
-            background: #f3f4f6;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+
+            gap: 15px;
+
+            padding: 13px 15px;
+
+            border: 1px solid #d8e9e1;
+
+            border-radius: 13px;
+
+            background:
+                linear-gradient(
+                    90deg,
+                    #f2faf6,
+                    #fbfdfc
+                );
         }
 
+        .privacy-main {
+            display: flex;
+            align-items: center;
+            gap: 11px;
+        }
 
-        /* =====================================================
-           SMALL TEXT
-           ===================================================== */
+        .privacy-icon {
+            width: 31px;
+            height: 31px;
 
-        .small {
+            display: grid;
+            place-items: center;
+
+            flex-shrink: 0;
+
+            border-radius: 9px;
+
+            background: #dff2e9;
+
+            color: var(--green);
+
+            font-size: 15px;
+        }
+
+        .privacy-main strong {
+            display: block;
 
             font-size: 12px;
+        }
 
-            color: #666666;
+        .privacy-main span {
+            display: block;
 
-            margin-top: 8px;
+            margin-top: 2px;
+
+            font-size: 10px;
+
+            color: var(--muted);
+        }
+
+        .local-pill {
+            padding: 7px 10px;
+
+            border-radius: 20px;
+
+            background: #e6f5ee;
+
+            color: var(--green-dark);
+
+            font-size: 10px;
+            font-weight: 700;
+
+            white-space: nowrap;
+        }
+
+        /* =========================================================
+           SECTION GRID
+           ========================================================= */
+
+        .section-grid {
+            display: grid;
+
+            grid-template-columns:
+                minmax(0, 1.15fr)
+                minmax(0, 0.85fr);
+
+            gap: 14px;
+
+            margin-top: 14px;
+        }
+
+        .panel {
+            min-width: 0;
+
+            background: var(--surface);
+
+            border: 1px solid var(--border);
+
+            border-radius: var(--radius);
+
+            box-shadow: var(--shadow);
+
+            overflow: hidden;
+        }
+
+        .panel-header {
+            min-height: 52px;
+
+            padding: 13px 15px;
+
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+
+            border-bottom: 1px solid #edf0ee;
+        }
+
+        .panel-title {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+
+            font-size: 13px;
+            font-weight: 750;
+        }
+
+        .panel-icon {
+            width: 25px;
+            height: 25px;
+
+            display: grid;
+            place-items: center;
+
+            border-radius: 7px;
+
+            background: #f1f5f3;
+
+            color: var(--green);
+
+            font-size: 12px;
+        }
+
+        .panel-body {
+            padding: 14px 15px;
+        }
+
+        .panel-badge {
+            padding: 5px 8px;
+
+            border-radius: 20px;
+
+            background: var(--green-soft);
+
+            color: var(--green-dark);
+
+            font-size: 9px;
+            font-weight: 750;
+        }
+
+        /* =========================================================
+           AGENT ACTIVITY
+           ========================================================= */
+
+        .activity {
+            position: relative;
+
+            padding-left: 22px;
+        }
+
+        .activity::before {
+            content: "";
+
+            position: absolute;
+
+            left: 6px;
+            top: 5px;
+            bottom: 5px;
+
+            width: 1px;
+
+            background: #dbe4df;
+        }
+
+        .activity-item {
+            position: relative;
+
+            padding: 0 0 14px;
+        }
+
+        .activity-item:last-child {
+            padding-bottom: 0;
+        }
+
+        .activity-dot {
+            position: absolute;
+
+            left: -22px;
+            top: 2px;
+
+            width: 13px;
+            height: 13px;
+
+            border: 2px solid #ffffff;
+
+            border-radius: 50%;
+
+            background: #9aa8a1;
+
+            box-shadow:
+                0 0 0 1px #d5ded9;
+        }
+
+        .activity-item.success .activity-dot {
+            background: #0b9565;
+
+            box-shadow:
+                0 0 0 1px #bce1d0;
+        }
+
+        .activity-item.active .activity-dot {
+            background: #2563eb;
+
+            box-shadow:
+                0 0 0 4px #e5edff;
+        }
+
+        .activity-title {
+            font-size: 11px;
+            font-weight: 750;
+        }
+
+        .activity-description {
+            margin-top: 3px;
+
+            color: var(--muted);
+
+            font-size: 9.5px;
 
             line-height: 1.4;
         }
 
+        .activity-time {
+            margin-top: 4px;
 
-        .hidden {
+            color: var(--muted-2);
 
-            display: none;
+            font-size: 9px;
         }
 
+        /* =========================================================
+           METRICS
+           ========================================================= */
 
-        /* =====================================================
+        .metrics {
+            display: grid;
+
+            grid-template-columns:
+                repeat(3, 1fr);
+
+            gap: 7px;
+
+            margin-top: 15px;
+        }
+
+        .metric {
+            padding: 10px;
+
+            border: 1px solid #e8ece9;
+
+            border-radius: 10px;
+
+            background: #fafbfa;
+        }
+
+        .metric-label {
+            color: var(--muted);
+
+            font-size: 8px;
+
+            text-transform: uppercase;
+
+            letter-spacing: 0.5px;
+        }
+
+        .metric-value {
+            margin-top: 4px;
+
+            font-size: 14px;
+
+            font-weight: 750;
+        }
+
+        /* =========================================================
+           PRIVACY AUDIT
+           ========================================================= */
+
+        .audit-list {
+            display: flex;
+
+            flex-direction: column;
+
+            gap: 9px;
+        }
+
+        .audit-row {
+            display: grid;
+
+            grid-template-columns:
+                minmax(0, 1fr)
+                auto
+                17px;
+
+            align-items: center;
+
+            gap: 8px;
+
+            font-size: 10px;
+        }
+
+        .audit-label {
+            color: #3f4b5a;
+        }
+
+        .audit-value {
+            color: var(--green-dark);
+
+            font-weight: 650;
+
+            text-align: right;
+        }
+
+        .audit-check {
+            width: 15px;
+            height: 15px;
+
+            display: grid;
+            place-items: center;
+
+            border-radius: 50%;
+
+            background: #e3f6ed;
+
+            color: #087f5b;
+
+            font-size: 8px;
+            font-weight: 800;
+        }
+
+        .audit-pass {
+            margin-top: 14px;
+
+            padding: 11px;
+
+            border: 1px solid #d3eadf;
+
+            border-radius: 10px;
+
+            background: #f1faf5;
+        }
+
+        .audit-pass-title {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+
+            color: var(--green-dark);
+
+            font-size: 10px;
+            font-weight: 750;
+        }
+
+        .audit-pass-description {
+            margin-top: 5px;
+
+            color: #5a7268;
+
+            font-size: 9px;
+            line-height: 1.4;
+        }
+
+        /* =========================================================
+           PREVIEW PANELS
+           ========================================================= */
+
+        .preview-panel {
+            margin-top: 14px;
+        }
+
+        .preview-body {
+            padding: 11px;
+        }
+
+        .preview {
+            display: block;
+
+            width: 100%;
+
+            max-height: 250px;
+
+            object-fit: contain;
+
+            border: 1px solid #dce3df;
+
+            border-radius: 9px;
+
+            background: #f1f4f2;
+        }
+
+        .preview-caption {
+            margin-top: 7px;
+
+            color: var(--muted);
+
+            font-size: 9px;
+
+            line-height: 1.4;
+        }
+
+        /* =========================================================
+           DETECTION BADGES
+           ========================================================= */
+
+        .detection-summary {
+            display: flex;
+
+            align-items: center;
+
+            justify-content: space-between;
+
+            gap: 10px;
+
+            margin-bottom: 10px;
+        }
+
+        .detection-count {
+            font-size: 11px;
+            font-weight: 750;
+        }
+
+        .detection-state {
+            padding: 5px 8px;
+
+            border-radius: 20px;
+
+            background: #fff3f2;
+
+            color: #b42318;
+
+            font-size: 8px;
+            font-weight: 750;
+        }
+
+        /* =========================================================
+           RESULT
+           ========================================================= */
+
+        .result {
+            margin-top: 14px;
+
+            padding: 0;
+
+            background: transparent;
+
+            border: 0;
+
+            font-size: 11px;
+
+            line-height: 1.5;
+        }
+
+        .result-title {
+            padding: 13px 15px;
+
+            border-bottom: 1px solid #edf0ee;
+
+            font-size: 14px;
+
+            font-weight: 750;
+        }
+
+        .result-content {
+            padding: 15px;
+        }
+
+        .result-title.success {
+            color: var(--green-dark);
+        }
+
+        .result-title.error {
+            color: var(--red);
+        }
+
+        .row {
+            margin: 7px 0;
+        }
+
+        .label {
+            font-weight: 700;
+        }
+
+        .success {
+            color: var(--green);
+
+            font-weight: 650;
+        }
+
+        .error {
+            color: var(--red);
+
+            font-weight: 650;
+        }
+
+        .privacy-badge {
+            display: inline-flex;
+
+            align-items: center;
+
+            padding: 6px 9px;
+
+            margin-bottom: 11px;
+
+            border-radius: 20px;
+
+            background: var(--green-soft);
+
+            color: var(--green-dark);
+
+            font-size: 9px;
+
+            font-weight: 750;
+
+            letter-spacing: 0.2px;
+        }
+
+        .result .preview {
+            margin-top: 12px;
+        }
+
+        .small {
+            margin-top: 8px;
+
+            color: var(--muted);
+
+            font-size: 9px;
+
+            line-height: 1.45;
+        }
+
+        /* =========================================================
+           FOOTER
+           ========================================================= */
+
+        .footer {
+            margin-top: 16px;
+
+            padding: 10px 3px 0;
+
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+
+            color: var(--muted-2);
+
+            font-size: 9px;
+        }
+
+        .footer-brand {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+
+            color: #344054;
+
+            font-weight: 700;
+        }
+
+        .footer-mark {
+            width: 15px;
+            height: 15px;
+
+            border: 4px solid #0b1828;
+            border-left-color: transparent;
+
+            border-radius: 4px 9px 9px 4px;
+        }
+
+        /* =========================================================
            LOADING
-           ===================================================== */
+           ========================================================= */
 
         .loading {
-
             display: inline-block;
 
-            width: 14px;
+            width: 13px;
+            height: 13px;
 
-            height: 14px;
+            margin-right: 7px;
 
-            border: 2px solid rgba(255,255,255,0.4);
+            vertical-align: -2px;
 
-            border-top-color: white;
+            border: 2px solid rgba(255,255,255,0.35);
+
+            border-top-color: #ffffff;
 
             border-radius: 50%;
 
             animation:
-                spin 0.8s linear infinite;
-
-            vertical-align: -2px;
-
-            margin-right: 7px;
+                devins-spin
+                0.75s linear infinite;
         }
 
-
-        @keyframes spin {
-
+        @keyframes devins-spin {
             from {
                 transform: rotate(0deg);
             }
@@ -411,166 +1156,652 @@
             to {
                 transform: rotate(360deg);
             }
-
         }
 
+        /* =========================================================
+           RESPONSIVE
+           ========================================================= */
+
+        @media (max-width: 735px) {
+            html {
+                min-width: 0;
+            }
+
+            body {
+                width: 100%;
+            }
+
+            .section-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .task-footer {
+                align-items: stretch;
+                flex-direction: column;
+            }
+
+            .capture-button {
+                width: 100%;
+            }
+
+            .protection-status {
+                display: none;
+            }
+        }
     </style>
-
 </head>
-
 
 <body>
 
+    <!-- =========================================================
+         TOP BAR
+         ========================================================= -->
 
-    <!-- =====================================================
-         HEADER
-         ===================================================== -->
+    <header class="topbar">
 
-    <div class="header">
+        <div class="brand">
 
-        🔒 SIH Privacy Agent
+            <div
+                class="devins-mark"
+                aria-label="Devins logo"
+            ></div>
 
-    </div>
+            <div>
+                <div class="brand-name">
+                    Devins
+                </div>
 
-
-    <!-- =====================================================
-         PRIVACY STATUS
-         ===================================================== -->
-
-    <div class="status">
-
-        🟢 Local Privacy Engine Active
-
-        <div class="small">
-
-            Sensitive information is detected and
-            sanitized locally before AI processing.
+                <div class="brand-subtitle">
+                    Privacy Browser Agent
+                </div>
+            </div>
 
         </div>
 
-    </div>
+        <div class="protection-status">
 
+            <span class="status-dot"></span>
 
-    <!-- =====================================================
-         TASK
-         ===================================================== -->
-
-    <div class="task-section">
-
-        <label
-            class="task-label"
-            for="taskInput">
-
-            🤖 Agent Task
-
-        </label>
-
-
-        <textarea
-            id="taskInput"
-            class="task-input"
-            placeholder="Example: Click the Full Name field"
-            spellcheck="false"></textarea>
-
-
-        <div class="task-help">
-
-            Tell the agent what browser action to perform.
-            Sensitive values are never reconstructed from
-            redacted content.
+            <div class="status-copy">
+                <strong>Active</strong>
+                <span>On-device protection enabled</span>
+            </div>
 
         </div>
 
-
-        <div class="quick-tasks">
-
-            <button
-                type="button"
-                class="quick-task"
-                data-task="Click the Full Name field">
-
-                Full Name
-
-            </button>
+    </header>
 
 
-            <button
-                type="button"
-                class="quick-task"
-                data-task="Click the Email field">
+    <!-- =========================================================
+         PAGE
+         ========================================================= -->
 
-                Email
+    <main class="page">
 
-            </button>
+        <!-- =====================================================
+             TASK
+             ===================================================== -->
 
+        <section class="task-card">
 
-            <button
-                type="button"
-                class="quick-task"
-                data-task="Click the Phone field">
+            <div class="eyebrow">
+                <span class="eyebrow-line"></span>
+                PRIVATE AGENT
+            </div>
 
-                Phone
+            <h1 class="task-title">
+                What should I do on this page?
+            </h1>
 
-            </button>
-
-
-            <button
-                type="button"
-                class="quick-task"
-                data-task="Click Submit">
-
-                Submit
-
-            </button>
+            <p class="task-description">
+                Describe your task naturally. Devins will
+                perceive the page, protect sensitive information,
+                and perform the requested browser actions.
+            </p>
 
 
-            <button
-                type="button"
-                class="quick-task"
-                data-task="Scroll down">
+            <div class="task-editor">
 
-                Scroll Down
+                <textarea
+                    id="taskInput"
+                    class="task-input"
+                    maxlength="500"
+                    placeholder='Example: Fill the Full Name field with "Amit Kumar" and submit the form'
+                    spellcheck="false"
+                ></textarea>
 
-            </button>
+                <div class="task-counter">
+                    0 / 500
+                </div>
 
-        </div>
-
-    </div>
-
-
-    <!-- =====================================================
-         EXECUTE
-         ===================================================== -->
-
-    <button
-        id="captureButton"
-        class="capture-button">
-
-        🛡️ Execute Private Agent
-
-    </button>
+            </div>
 
 
-    <!-- =====================================================
-         RESULT
-         ===================================================== -->
+            <div class="task-footer">
 
-    <div
-        id="result"
-        class="result hidden">
+                <div class="task-hint">
+
+                    <span class="shield-mini">
+                        ✓
+                    </span>
+
+                    Sensitive values are never read from
+                    the webpage.
+
+                </div>
+
+
+                <button
+                    id="captureButton"
+                    class="capture-button"
+                    type="button"
+                >
+                    ▶&nbsp; Run Agent
+                </button>
+
+            </div>
+
+
+            <!-- Examples -->
+
+            <div class="examples">
+
+                <span class="examples-label">
+                    Try an example:
+                </span>
+
+
+                <button
+                    type="button"
+                    class="quick-task"
+                    data-task="Fill the Full Name field with &quot;Amit Kumar&quot;"
+                >
+                    Fill the form
+                </button>
+
+
+                <button
+                    type="button"
+                    class="quick-task"
+                    data-task="Click the Submit button"
+                >
+                    Click Submit
+                </button>
+
+
+                <button
+                    type="button"
+                    class="quick-task"
+                    data-task="Scroll down to find the Submit button"
+                >
+                    Scroll &amp; find
+                </button>
+
+
+                <button
+                    type="button"
+                    class="quick-task"
+                    data-task="Capture and sanitize the page"
+                >
+                    Capture page
+                </button>
+
+            </div>
+
+        </section>
+
+
+        <!-- =====================================================
+             PRIVACY STRIP
+             ===================================================== -->
+
+        <section class="privacy-strip">
+
+            <div class="privacy-main">
+
+                <div class="privacy-icon">
+                    ✓
+                </div>
+
+                <div>
+
+                    <strong>
+                        Privacy-first agent
+                    </strong>
+
+                    <span>
+                        Sensitive information is detected and
+                        sanitized locally before reaching the AI.
+                    </span>
+
+                </div>
+
+            </div>
+
+
+            <div class="local-pill">
+                ● On-device protection
+            </div>
+
+        </section>
+
+
+        <!-- =====================================================
+             RESULT
+             ===================================================== -->
+
+        <section
+            id="result"
+            class="panel result hidden"
+        >
+
+            <div
+                id="resultTitle"
+                class="result-title"
+            ></div>
+
+            <div
+                id="resultContent"
+                class="result-content"
+            ></div>
+
+        </section>
+
+
+        <!-- =====================================================
+             DEFAULT AGENT / PRIVACY INFORMATION
+             ===================================================== -->
 
         <div
-            id="resultTitle"
-            class="result-title">
+            id="agentOverview"
+            class="section-grid"
+        >
+
+            <!-- =================================================
+                 AGENT ACTIVITY
+                 ================================================= -->
+
+            <section class="panel">
+
+                <div class="panel-header">
+
+                    <div class="panel-title">
+
+                        <span class="panel-icon">
+                            ≡
+                        </span>
+
+                        Agent Activity
+
+                    </div>
+
+                    <span class="panel-badge">
+                        READY
+                    </span>
+
+                </div>
+
+
+                <div class="panel-body">
+
+                    <div class="activity">
+
+                        <div class="activity-item active">
+
+                            <span class="activity-dot"></span>
+
+                            <div class="activity-title">
+                                Waiting for a task
+                            </div>
+
+                            <div class="activity-description">
+                                Devins is ready to perceive the
+                                current browser page.
+                            </div>
+
+                        </div>
+
+
+                        <div class="activity-item">
+
+                            <span class="activity-dot"></span>
+
+                            <div class="activity-title">
+                                Local perception
+                            </div>
+
+                            <div class="activity-description">
+                                DOM and screenshot perception
+                                happens inside the browser.
+                            </div>
+
+                        </div>
+
+
+                        <div class="activity-item">
+
+                            <span class="activity-dot"></span>
+
+                            <div class="activity-title">
+                                Privacy gate
+                            </div>
+
+                            <div class="activity-description">
+                                Only sanitized visual context
+                                can leave the extension.
+                            </div>
+
+                        </div>
+
+
+                        <div class="activity-item">
+
+                            <span class="activity-dot"></span>
+
+                            <div class="activity-title">
+                                Action execution
+                            </div>
+
+                            <div class="activity-description">
+                                Approved actions are executed
+                                locally by the extension.
+                            </div>
+
+                        </div>
+
+                    </div>
+
+
+                    <div class="metrics">
+
+                        <div class="metric">
+
+                            <div class="metric-label">
+                                Planner
+                            </div>
+
+                            <div class="metric-value">
+                                —
+                            </div>
+
+                        </div>
+
+
+                        <div class="metric">
+
+                            <div class="metric-label">
+                                Network
+                            </div>
+
+                            <div class="metric-value">
+                                —
+                            </div>
+
+                        </div>
+
+
+                        <div class="metric">
+
+                            <div class="metric-label">
+                                Total
+                            </div>
+
+                            <div class="metric-value">
+                                —
+                            </div>
+
+                        </div>
+
+                    </div>
+
+                </div>
+
+            </section>
+
+
+            <!-- =================================================
+                 PRIVACY AUDIT
+                 ================================================= -->
+
+            <section class="panel">
+
+                <div class="panel-header">
+
+                    <div class="panel-title">
+
+                        <span class="panel-icon">
+                            ✓
+                        </span>
+
+                        Privacy Audit
+
+                    </div>
+
+                    <span class="panel-badge">
+                        READY
+                    </span>
+
+                </div>
+
+
+                <div class="panel-body">
+
+                    <div class="audit-list">
+
+                        <div class="audit-row">
+
+                            <span class="audit-label">
+                                Sanitized screenshot
+                            </span>
+
+                            <span class="audit-value">
+                                Required
+                            </span>
+
+                            <span class="audit-check">
+                                ✓
+                            </span>
+
+                        </div>
+
+
+                        <div class="audit-row">
+
+                            <span class="audit-label">
+                                Detection values
+                            </span>
+
+                            <span class="audit-value">
+                                Blocked
+                            </span>
+
+                            <span class="audit-check">
+                                ✓
+                            </span>
+
+                        </div>
+
+
+                        <div class="audit-row">
+
+                            <span class="audit-label">
+                                Raw DOM values
+                            </span>
+
+                            <span class="audit-value">
+                                Blocked
+                            </span>
+
+                            <span class="audit-check">
+                                ✓
+                            </span>
+
+                        </div>
+
+
+                        <div class="audit-row">
+
+                            <span class="audit-label">
+                                Sensitive URL data
+                            </span>
+
+                            <span class="audit-value">
+                                Blocked
+                            </span>
+
+                            <span class="audit-check">
+                                ✓
+                            </span>
+
+                        </div>
+
+
+                        <div class="audit-row">
+
+                            <span class="audit-label">
+                                Password / OTP
+                            </span>
+
+                            <span class="audit-value">
+                                Protected
+                            </span>
+
+                            <span class="audit-check">
+                                ✓
+                            </span>
+
+                        </div>
+
+
+                        <div class="audit-row">
+
+                            <span class="audit-label">
+                                Raw screenshot
+                            </span>
+
+                            <span class="audit-value">
+                                Never sent
+                            </span>
+
+                            <span class="audit-check">
+                                ✓
+                            </span>
+
+                        </div>
+
+                    </div>
+
+
+                    <div class="audit-pass">
+
+                        <div class="audit-pass-title">
+                            <span>✓</span>
+                            Privacy boundary enforced
+                        </div>
+
+                        <div class="audit-pass-description">
+                            PII detection and screenshot
+                            sanitization happen locally before
+                            the planner receives page context.
+                        </div>
+
+                    </div>
+
+                </div>
+
+            </section>
+
         </div>
 
-        <div id="resultContent"></div>
 
-    </div>
+        
 
 
-   <script defer src="popup.js"></script>
+        <!-- =====================================================
+             FOOTER
+             ===================================================== -->
+
+        <footer class="footer">
+
+            <div class="footer-brand">
+
+                <span class="footer-mark"></span>
+
+                Devins
+
+                <span
+                    style="
+                        font-weight:400;
+                        color:#9aa4af;
+                    "
+                >
+                    Safer browsing with AI
+                </span>
+
+            </div>
+
+
+            <div>
+                On-device privacy • v1.0.0
+            </div>
+
+        </footer>
+
+    </main>
+
+
+    <!-- =========================================================
+         SCRIPT
+         ========================================================= -->
+
+    <script>
+
+        /*
+         * Keep this page connected to the existing popup.js.
+         * The IDs below are intentionally unchanged:
+         *
+         * taskInput
+         * captureButton
+         * result
+         * resultTitle
+         * resultContent
+         */
+
+        const taskInput =
+            document.getElementById(
+                "taskInput"
+            );
+
+        const taskCounter =
+            document.querySelector(
+                ".task-counter"
+            );
+
+        if (taskInput && taskCounter) {
+
+            const updateCounter =
+                () => {
+
+                    taskCounter.textContent =
+                        `${taskInput.value.length} / 500`;
+
+                };
+
+            taskInput.addEventListener(
+                "input",
+                updateCounter
+            );
+
+            updateCounter();
+
+        }
+
+    </script>
+
+    <script
+        defer
+        src="popup.js"
+    ></script>
 
 </body>
-
 </html>
