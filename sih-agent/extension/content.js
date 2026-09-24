@@ -1345,7 +1345,85 @@ function resetDetections() {
 
     detections = [];
 }
+// ============================================================
+// STAGE 2 — DOM PERCEPTION ADAPTER
+// ============================================================
+//
+// The existing DOM PII engine remains unchanged.
+//
+// This adapter exposes its results through the new
+// Perception Foundation interface.
+//
+// IMPORTANT:
+// Raw detection.value remains LOCAL ONLY.
+// ============================================================
 
+function runDOMPerceptionAdapter() {
+
+    detectDOMPII();
+
+    return detections.map(
+        detection => ({
+
+            type:
+                detection.type,
+
+            source:
+                "dom",
+
+            confidence:
+                1,
+
+            rect:
+                detection.rect
+                    ? {
+                        left:
+                            detection.rect.left,
+
+                        top:
+                            detection.rect.top,
+
+                        right:
+                            detection.rect.right,
+
+                        bottom:
+                            detection.rect.bottom,
+
+                        width:
+                            detection.rect.width,
+
+                        height:
+                            detection.rect.height
+                    }
+                    : null
+        })
+    );
+}
+
+
+if (
+    window.SIHPerception &&
+    typeof window.SIHPerception.registerDetector ===
+        "function"
+) {
+
+    window.SIHPerception.registerDetector(
+        "dom",
+        {
+            enabled: true,
+            source: "dom",
+            version: "1.0.0",
+            detect:
+                runDOMPerceptionAdapter
+        }
+    );
+
+} else {
+
+    console.error(
+        "[PERCEPTION] Perception manager not loaded."
+    );
+}
 
 // ============================================================
 // SERIALIZABLE DETECTIONS
@@ -2131,17 +2209,62 @@ function runPrivacyEngine() {
         true;
 
 
-    try {
+   try {
 
-        detectDOMPII();
+    // ========================================================
+    // STAGE 2 PERCEPTION FOUNDATION
+    // ========================================================
+    //
+    // Phase 1:
+    //     DOM detector is active.
+    //
+    // Future:
+    //     OCR detector
+    //     Face detector
+    //
+    // All detectors remain local.
+    // ========================================================
 
-        /*
-         * Keep webpage completely normal.
-         *
-         * PII masking is applied ONLY to captured screenshots.
-         */
+    if (
+    window.SIHPerception &&
+    typeof window.SIHPerception.runSync ===
+        "function"
+) {
 
-        removePrivacyOverlays();
+    const perceptionResult =
+        window.SIHPerception.runSync();
+
+    if (
+        perceptionResult &&
+        Number.isFinite(
+            perceptionResult.latencyMs
+        )
+    ) {
+
+        console.log(
+            "[PERCEPTION] Local perception latency:",
+            perceptionResult.latencyMs.toFixed(2),
+            "ms"
+        );
+    }
+
+} else {
+
+    // Safe Stage 1 fallback.
+    // This protects the working prototype if the manager
+    // is unavailable for any reason.
+
+    detectDOMPII();
+}
+
+
+    /*
+     * Keep webpage completely normal.
+     *
+     * PII masking is applied ONLY to captured screenshots.
+     */
+
+    removePrivacyOverlays();
 
     } catch (error) {
 
