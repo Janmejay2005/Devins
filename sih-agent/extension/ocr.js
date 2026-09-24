@@ -47,18 +47,16 @@
     // ========================================================
 
     const ocrMetrics = {
+    runs: 0,
+    totalLatencyMs: 0,
+    lastLatencyMs: 0,
+    lastWordCount: 0,
+    totalWords: 0,
 
-        runs: 0,
-
-        totalLatencyMs: 0,
-
-        lastLatencyMs: 0,
-
-        lastWordCount: 0,
-
-        totalWords: 0
-
-    };
+    piiRuns: 0,
+    totalPIIDetections: 0,
+    lastPIIDetections: 0
+};
 
 
     // ========================================================
@@ -408,6 +406,245 @@
     // ========================================================
     // OCR SCREENSHOT
     // ========================================================
+    function detectOCRPII(words) {
+
+    if (!Array.isArray(words) || words.length === 0) {
+        return {
+            detections: [],
+            text: "",
+            latencyMs: 0
+        };
+    }
+
+    const start = performance.now();
+
+    /*
+     * Build OCR text while preserving which OCR word
+     * produced each character.
+     *
+     * IMPORTANT:
+     * Actual OCR text stays inside this content script.
+     */
+
+    let reconstructedText = "";
+    const characterMap = [];
+
+    for (let i = 0; i < words.length; i++) {
+
+        const word = words[i];
+
+        if (!word || typeof word.text !== "string") {
+            continue;
+        }
+
+        const text = word.text.trim();
+
+        if (!text) {
+            continue;
+        }
+
+        if (reconstructedText.length > 0) {
+
+            reconstructedText += " ";
+
+            characterMap.push({
+                wordIndex: null
+            });
+        }
+
+        for (const character of text) {
+
+            characterMap.push({
+                wordIndex: i
+            });
+
+            reconstructedText += character;
+        }
+    }
+
+    const detections = [];
+
+    /*
+     * Use the same PII patterns already used by
+     * the DOM detector.
+     */
+
+    const patterns = [
+        {
+            type: "EMAIL",
+            pattern:
+                typeof PII_PATTERNS !== "undefined"
+                    ? PII_PATTERNS.EMAIL
+                    : null
+        },
+        {
+            type: "PHONE",
+            pattern:
+                typeof PII_PATTERNS !== "undefined"
+                    ? PII_PATTERNS.PHONE
+                    : null
+        },
+        {
+            type: "AADHAAR",
+            pattern:
+                typeof PII_PATTERNS !== "undefined"
+                    ? PII_PATTERNS.AADHAAR
+                    : null
+        },
+        {
+            type: "PAN",
+            pattern:
+                typeof PII_PATTERNS !== "undefined"
+                    ? PII_PATTERNS.PAN
+                    : null
+        },
+        {
+            type: "CREDIT_CARD",
+            pattern:
+                typeof PII_PATTERNS !== "undefined"
+                    ? PII_PATTERNS.CREDIT_CARD
+                    : null
+        }
+    ];
+
+    for (const detector of patterns) {
+
+        if (!(detector.pattern instanceof RegExp)) {
+            continue;
+        }
+
+        /*
+         * Reset global regex state.
+         */
+
+        detector.pattern.lastIndex = 0;
+
+        let match;
+
+        while (
+            (match =
+                detector.pattern.exec(
+                    reconstructedText
+                )) !== null
+        ) {
+
+            const startIndex = match.index;
+
+            const endIndex =
+                startIndex + match[0].length;
+
+            const matchedWordIndexes = new Set();
+
+            for (
+                let i = startIndex;
+                i < endIndex;
+                i++
+            ) {
+
+                const wordIndex =
+                    characterMap[i]?.wordIndex;
+
+                if (
+                    Number.isInteger(wordIndex)
+                ) {
+                    matchedWordIndexes.add(
+                        wordIndex
+                    );
+                }
+            }
+
+            if (matchedWordIndexes.size === 0) {
+                continue;
+            }
+
+            const matchedWords =
+                Array.from(
+                    matchedWordIndexes
+                )
+                    .map(
+                        index => words[index]
+                    )
+                    .filter(Boolean);
+
+            if (matchedWords.length === 0) {
+                continue;
+            }
+
+            /*
+             * Combine all OCR word rectangles
+             * participating in this PII match.
+             */
+
+            const left = Math.min(
+                ...matchedWords.map(
+                    word => word.rect.left
+                )
+            );
+
+            const top = Math.min(
+                ...matchedWords.map(
+                    word => word.rect.top
+                )
+            );
+
+            const right = Math.max(
+                ...matchedWords.map(
+                    word => word.rect.right
+                )
+            );
+
+            const bottom = Math.max(
+                ...matchedWords.map(
+                    word => word.rect.bottom
+                )
+            );
+
+            const confidence = Math.min(
+                ...matchedWords.map(
+                    word =>
+                        Number.isFinite(
+                            word.confidence
+                        )
+                            ? word.confidence
+                            : 0
+                )
+            );
+
+            detections.push({
+                type: detector.type,
+                source: "ocr",
+                confidence:
+                    confidence / 100,
+                rect: {
+                    left,
+                    top,
+                    right,
+                    bottom,
+                    width: right - left,
+                    height: bottom - top
+                }
+            });
+
+            /*
+             * Prevent infinite loops with
+             * zero-length regex matches.
+             */
+
+            if (match[0].length === 0) {
+                detector.pattern.lastIndex++;
+            }
+        }
+    }
+
+    const latency =
+        performance.now() - start;
+
+    return {
+        detections,
+        text: reconstructedText,
+        latencyMs: latency
+    };
+}
 
     async function testScreenshot(
         screenshot
@@ -555,7 +792,8 @@ console.log(
             }
 
         }
-
+        const ocrPIIResult =
+    detectOCRPII(words);
 
         const latency =
             performance.now() -
@@ -594,7 +832,11 @@ console.log(
          * This prevents sensitive OCR
          * content from appearing in logs.
          */
-
+        console.log(
+    "[OCR] PII summary:",
+    `detections=${ocrPIIResult.detections.length}`,
+    `latency=${ocrPIIResult.latencyMs.toFixed(2)} ms`
+);
         console.log(
             "[OCR] Completed:",
             `${latency.toFixed(2)} ms`,

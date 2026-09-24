@@ -1081,12 +1081,12 @@ function detectPIIPatterns(
     ) {
 
         addDetection(
-            "PAN",
-            match[0],
-            element,
-            rect,
-            source
-        );
+    "PAN",
+    match[0],
+    element,
+    rectFor(match.index, match[0].length),
+    source
+);
     }
 }
 
