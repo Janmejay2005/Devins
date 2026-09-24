@@ -133,9 +133,25 @@ function createEmptyBenchmarkMetrics() {
         compressionRatio: 0,   // selected bytes / raw screenshot bytes
 
         detectionCount: 0,
-        verificationRegions: 0,
-        verificationFailedRegions: 0,
-        verificationPassed: null   // null = not run yet
+
+// ========================================================
+// PHASE 2.5 — ADVANCED REDACTION METRICS
+// ========================================================
+
+unifiedPIIRegions: 0,
+inCaptureRegions: 0,
+outOfViewRegions: 0,
+invalidRegions: 0,
+redactedRegions: 0,
+
+verificationRegions: 0,
+verificationFailedRegions: 0,
+verificationPassed: null,
+
+// Fail-closed privacy gate.
+// true  = sanitized screenshot may be transmitted.
+// false = transmission must be blocked.
+privacyGatePassed: null
     };
 }
 
@@ -2450,6 +2466,35 @@ function countUnredactedRegions(
 // Off-screen detections are naturally clipped by the canvas.
 // ============================================================
 
+// ============================================================
+// SCREENSHOT SANITIZATION
+// PHASE 2.5 — ADVANCED REDACTION + VERIFICATION
+// ============================================================
+//
+// Privacy pipeline:
+//
+//   Unified PII
+//        ↓
+//   Region classification
+//        ↓
+//   Viewport clipping
+//        ↓
+//   Screenshot redaction
+//        ↓
+//   Pixel verification
+//        ↓
+//   Privacy Gate
+//        ↓
+//   Encode sanitized image
+//
+// IMPORTANT:
+// - Live webpage is NEVER visually masked.
+// - Only screenshots are redacted.
+// - Out-of-view PII is tracked separately.
+// - Invalid/unredactable PII fails closed.
+// - Failed verification blocks transmission.
+// ============================================================
+
 function sanitizeScreenshot(
     screenshot,
     detectionList
@@ -2463,6 +2508,32 @@ function sanitizeScreenshot(
             screenshot
         );
 
+    // ========================================================
+    // RESET PHASE 2.5 METRICS
+    // ========================================================
+
+    benchmarkMetrics.unifiedPIIRegions =
+        Array.isArray(detectionList)
+            ? detectionList.length
+            : 0;
+
+    benchmarkMetrics.inCaptureRegions = 0;
+
+    benchmarkMetrics.outOfViewRegions = 0;
+
+    benchmarkMetrics.invalidRegions = 0;
+
+    benchmarkMetrics.redactedRegions = 0;
+
+    benchmarkMetrics.verificationRegions = 0;
+
+    benchmarkMetrics.verificationFailedRegions = 0;
+
+    benchmarkMetrics.verificationPassed = null;
+
+    benchmarkMetrics.privacyGatePassed = null;
+
+
     return new Promise(
         (
             resolve,
@@ -2471,9 +2542,10 @@ function sanitizeScreenshot(
 
             try {
 
-                if (
-                    !screenshot
-                ) {
+                if (!screenshot) {
+
+                    benchmarkMetrics.privacyGatePassed =
+                        false;
 
                     reject(
                         new Error(
@@ -2519,6 +2591,9 @@ function sanitizeScreenshot(
 
                             if (!context) {
 
+                                benchmarkMetrics.privacyGatePassed =
+                                    false;
+
                                 reject(
                                     new Error(
                                         "Could not create canvas context"
@@ -2548,6 +2623,9 @@ function sanitizeScreenshot(
                                 viewportHeight <= 0
                             ) {
 
+                                benchmarkMetrics.privacyGatePassed =
+                                    false;
+
                                 reject(
                                     new Error(
                                         "Invalid viewport dimensions"
@@ -2567,28 +2645,49 @@ function sanitizeScreenshot(
                                 viewportHeight;
 
 
+                            // ====================================================
+                            // REGION CLASSIFICATION
+                            // ====================================================
+
                             const paintRegions = [];
 
                             const coreRegions = [];
 
-                            let unredactableCount = 0;
+                            let outOfViewCount = 0;
+
+                            let invalidCount = 0;
 
 
-                            (detectionList || []).forEach(
+                            (
+                                Array.isArray(
+                                    detectionList
+                                )
+                                    ? detectionList
+                                    : []
+                            ).forEach(
                                 detection => {
 
                                     if (!detection) {
-                                        return;
-                                    }
 
-                                    // A detection without geometry can
-                                    // never be redacted -> fail closed.
-                                    if (!detection.rect) {
-
-                                        unredactableCount++;
+                                        invalidCount++;
 
                                         return;
                                     }
+
+
+                                    // ------------------------------------------------
+                                    // Missing geometry
+                                    // ------------------------------------------------
+
+                                    if (
+                                        !detection.rect
+                                    ) {
+
+                                        invalidCount++;
+
+                                        return;
+                                    }
+
 
                                     const regions =
                                         toCanvasRegions(
@@ -2602,16 +2701,54 @@ function sanitizeScreenshot(
                                             REDACTION_PADDING
                                         );
 
-                                    if (regions.invalid) {
 
-                                        unredactableCount++;
+                                    // ------------------------------------------------
+                                    // Invalid geometry
+                                    // ------------------------------------------------
+
+                                    if (
+                                        regions.invalid
+                                    ) {
+
+                                        invalidCount++;
 
                                         return;
                                     }
 
-                                    if (regions.outside) {
+
+                                    // ------------------------------------------------
+                                    // Completely outside viewport
+                                    //
+                                    // This is NOT a redaction failure.
+                                    // It is tracked separately because the
+                                    // current screenshot cannot contain that
+                                    // region.
+                                    // ------------------------------------------------
+
+                                    if (
+                                        regions.outside
+                                    ) {
+
+                                        outOfViewCount++;
+
                                         return;
                                     }
+
+
+                                    // ------------------------------------------------
+                                    // Valid region inside / intersecting capture
+                                    // ------------------------------------------------
+
+                                    if (
+                                        !regions.core ||
+                                        !regions.paint
+                                    ) {
+
+                                        invalidCount++;
+
+                                        return;
+                                    }
+
 
                                     paintRegions.push(
                                         regions.paint
@@ -2624,8 +2761,23 @@ function sanitizeScreenshot(
                             );
 
 
+                            benchmarkMetrics.inCaptureRegions =
+                                coreRegions.length;
+
+                            benchmarkMetrics.outOfViewRegions =
+                                outOfViewCount;
+
+                            benchmarkMetrics.invalidRegions =
+                                invalidCount;
+
+
+                            // ====================================================
+                            // REDACT
+                            // ====================================================
+
                             context.fillStyle =
                                 "#000000";
+
 
                             paintRegions.forEach(
                                 region => {
@@ -2636,17 +2788,20 @@ function sanitizeScreenshot(
                                         region.width,
                                         region.height
                                     );
+
                                 }
                             );
 
 
-                            // ====================================
-                            // VERIFY REDACTION
-                            // ====================================
+                            benchmarkMetrics.redactedRegions =
+                                paintRegions.length;
 
-                            // Force any pending canvas drawing to finish
-                            // first, so that time is counted as redaction
-                            // and not as verification.
+
+                            // ====================================================
+                            // VERIFY REDACTION
+                            // ====================================================
+
+                            // Force pending canvas operations to complete.
                             context.getImageData(
                                 0,
                                 0,
@@ -2654,28 +2809,93 @@ function sanitizeScreenshot(
                                 1
                             );
 
+
                             const verifyStart =
                                 performance.now();
 
-                            const failedRegions =
+
+                            const pixelFailures =
                                 countUnredactedRegions(
                                     context,
                                     coreRegions
-                                ) + unredactableCount;
+                                );
+
+
+                            // Invalid regions are privacy failures.
+                            const failedRegions =
+                                pixelFailures +
+                                invalidCount;
+
 
                             benchmarkMetrics.verificationLatencyMs =
                                 performance.now() -
                                 verifyStart;
 
+
                             benchmarkMetrics.verificationRegions =
                                 coreRegions.length +
-                                unredactableCount;
+                                invalidCount;
+
 
                             benchmarkMetrics.verificationFailedRegions =
                                 failedRegions;
 
+
                             benchmarkMetrics.verificationPassed =
                                 failedRegions === 0;
+
+
+                            // ====================================================
+                            // PRIVACY GATE
+                            // ====================================================
+                            //
+                            // PASS:
+                            //   Every region that belongs to this capture
+                            //   was successfully redacted.
+                            //
+                            // OUT-OF-VIEW:
+                            //   Not a failure because it cannot exist inside
+                            //   this screenshot.
+                            //
+                            // FAIL:
+                            //   Invalid geometry OR failed pixel verification.
+                            //
+                            // ====================================================
+
+                            const privacyGatePassed =
+                                (
+                                    failedRegions === 0
+                                );
+
+                            benchmarkMetrics.privacyGatePassed =
+                                privacyGatePassed;
+
+
+                            console.log(
+                                "[REDACTION] Unified PII       :",
+                                benchmarkMetrics.unifiedPIIRegions
+                            );
+
+                            console.log(
+                                "[REDACTION] In-capture        :",
+                                benchmarkMetrics.inCaptureRegions
+                            );
+
+                            console.log(
+                                "[REDACTION] Out-of-view       :",
+                                benchmarkMetrics.outOfViewRegions
+                            );
+
+                            console.log(
+                                "[REDACTION] Invalid           :",
+                                benchmarkMetrics.invalidRegions
+                            );
+
+                            console.log(
+                                "[REDACTION] Redacted          :",
+                                benchmarkMetrics.redactedRegions
+                            );
+
 
                             console.log(
                                 "[BENCHMARK] Redaction verification:",
@@ -2687,15 +2907,32 @@ function sanitizeScreenshot(
                                 `${benchmarkMetrics.verificationLatencyMs.toFixed(2)} ms)`
                             );
 
-                            if (failedRegions > 0) {
 
-                                // Nothing is returned -> nothing can
-                                // be transmitted.
+                            console.log(
+                                "[PRIVACY GATE]:",
+                                privacyGatePassed
+                                    ? "PASS"
+                                    : "FAIL"
+                            );
+
+
+                            // ====================================================
+                            // FAIL CLOSED
+                            // ====================================================
+
+                            if (
+                                !privacyGatePassed
+                            ) {
+
+                                // NEVER return the screenshot.
+                                // This prevents transmission of an image
+                                // whose PII redaction could not be verified.
+
                                 reject(
                                     new Error(
-                                        "Redaction verification failed: " +
+                                        "Privacy gate failed: " +
                                         failedRegions +
-                                        " region(s) not fully redacted"
+                                        " region(s) could not be safely redacted."
                                     )
                                 );
 
@@ -2703,53 +2940,58 @@ function sanitizeScreenshot(
                             }
 
 
-                            // ====================================
+                            // ====================================================
                             // IMAGE FORMAT BENCHMARK
-                            // ====================================
+                            // ====================================================
                             //
-                            // Redaction has already passed
-                            // verification above.
-                            //
-                            // Both PNG and WebP are measured. WebP is
-                            // selected for transmission only when it
-                            // is valid, smaller than PNG and enabled.
+                            // Only reached after privacy verification PASS.
+                            // ====================================================
 
                             const pngBenchmarkStart =
                                 performance.now();
+
 
                             const sanitizedPng =
                                 canvas.toDataURL(
                                     "image/png"
                                 );
 
+
                             const pngEncodingLatencyMs =
                                 performance.now() -
                                 pngBenchmarkStart;
+
 
                             const pngBytes =
                                 getDataUrlByteSize(
                                     sanitizedPng
                                 );
 
+
                             benchmarkMetrics.screenshotPngBytes =
                                 pngBytes;
+
 
                             const webpResult =
                                 encodeSanitizedWebP(
                                     canvas
                                 );
 
+
                             benchmarkMetrics.screenshotWebpBytes =
                                 webpResult.bytes;
 
 
-                            // ------------------------------------
+                            // ====================================================
                             // SELECT TRANSMISSION FORMAT
-                            // ------------------------------------
+                            // ====================================================
 
                             let sanitizedScreenshot = "";
+
                             let selectedFormat = "";
+
                             let selectedBytes = 0;
+
 
                             if (
                                 SIH_CONFIG.transmitWebP &&
@@ -2779,6 +3021,29 @@ function sanitizeScreenshot(
                                     pngBytes;
                             }
 
+
+                            // ====================================================
+                            // FINAL TRANSMISSION SAFETY CHECK
+                            // ====================================================
+
+                            if (
+                                !sanitizedScreenshot ||
+                                selectedBytes <= 0
+                            ) {
+
+                                benchmarkMetrics.privacyGatePassed =
+                                    false;
+
+                                reject(
+                                    new Error(
+                                        "Privacy gate failed: sanitized image could not be encoded."
+                                    )
+                                );
+
+                                return;
+                            }
+
+
                             benchmarkMetrics.screenshotAfterBytes =
                                 selectedBytes;
 
@@ -2796,10 +3061,9 @@ function sanitizeScreenshot(
                                 webpResult.latencyMs;
 
 
-                            // ------------------------------------
+                            // ====================================================
                             // COMPRESSION RATIO
-                            // (selected image / raw screenshot)
-                            // ------------------------------------
+                            // ====================================================
 
                             benchmarkMetrics.compressionRatio =
                                 (
@@ -2811,9 +3075,9 @@ function sanitizeScreenshot(
                                     : 0;
 
 
-                            // ------------------------------------
+                            // ====================================================
                             // BENCHMARK LOGGING
-                            // ------------------------------------
+                            // ====================================================
 
                             console.log(
                                 "[BENCHMARK] PNG size:",
@@ -2821,22 +3085,26 @@ function sanitizeScreenshot(
                                 "KB"
                             );
 
+
                             console.log(
                                 "[BENCHMARK] WebP size:",
                                 (webpResult.bytes / 1024).toFixed(2),
                                 "KB"
                             );
 
+
                             console.log(
                                 "[BENCHMARK] Selected format:",
                                 selectedFormat
                             );
+
 
                             console.log(
                                 "[BENCHMARK] Selected size:",
                                 (selectedBytes / 1024).toFixed(2),
                                 "KB"
                             );
+
 
                             console.log(
                                 "[BENCHMARK] Compression latency:",
@@ -2846,15 +3114,15 @@ function sanitizeScreenshot(
                                 `WebP ${webpResult.latencyMs.toFixed(2)} ms)`
                             );
 
+
                             console.log(
                                 "[BENCHMARK] Compression ratio:",
                                 benchmarkMetrics.compressionRatio.toFixed(4)
                             );
 
 
-                            // Redaction latency = painting only:
-                            // verification and compression are
-                            // reported separately.
+                            // Redaction latency excludes verification
+                            // and compression.
                             benchmarkMetrics.redactionLatencyMs =
                                 (
                                     performance.now() -
@@ -2863,11 +3131,13 @@ function sanitizeScreenshot(
                                 benchmarkMetrics.verificationLatencyMs -
                                 benchmarkMetrics.compressionLatencyMs;
 
+
                             console.log(
                                 "[BENCHMARK] Redaction latency:",
                                 benchmarkMetrics.redactionLatencyMs.toFixed(2),
                                 "ms"
                             );
+
 
                             console.log(
                                 "[BENCHMARK] Screenshot before:",
@@ -2878,6 +3148,7 @@ function sanitizeScreenshot(
                                 "KB"
                             );
 
+
                             console.log(
                                 "[BENCHMARK] Screenshot after:",
                                 (
@@ -2887,11 +3158,38 @@ function sanitizeScreenshot(
                                 "KB"
                             );
 
+
+                            // ====================================================
+                            // FINAL PRIVACY ASSERTION
+                            // ====================================================
+
+                            if (
+                                benchmarkMetrics.privacyGatePassed !== true
+                            ) {
+
+                                reject(
+                                    new Error(
+                                        "Privacy gate was not satisfied."
+                                    )
+                                );
+
+                                return;
+                            }
+
+
+                            // ====================================================
+                            // SAFE RETURN
+                            // ====================================================
+
                             resolve(
                                 sanitizedScreenshot
                             );
 
+
                         } catch (error) {
+
+                            benchmarkMetrics.privacyGatePassed =
+                                false;
 
                             reject(
                                 error
@@ -2902,6 +3200,9 @@ function sanitizeScreenshot(
 
                 image.onerror =
                     () => {
+
+                        benchmarkMetrics.privacyGatePassed =
+                            false;
 
                         reject(
                             new Error(
@@ -2914,7 +3215,11 @@ function sanitizeScreenshot(
                 image.src =
                     screenshot;
 
+
             } catch (error) {
+
+                benchmarkMetrics.privacyGatePassed =
+                    false;
 
                 reject(
                     error
