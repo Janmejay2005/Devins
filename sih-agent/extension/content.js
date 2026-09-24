@@ -5381,65 +5381,227 @@ if (
                 // Continue normal privacy sanitization.
                 // ----------------------------------------
 
-                return sanitizeScreenshot(
+                // ----------------------------------------
+// PHASE 2.4 — MULTI-SOURCE PII FUSION
+// ----------------------------------------
+//
+// DOM detections and OCR detections are
+// independently generated.
+//
+// DOM detections:
+//     message.detections
+//
+// OCR detections:
+//     ocrResult.detections
+//
+// Fusion combines overlapping detections,
+// removes duplicates and preserves
+// OCR-only detections.
+//
+// IMPORTANT:
+// Actual PII values never enter this layer.
+// Only:
+//     type
+//     source
+//     confidence
+//     rect
+//
+// are used.
+// ----------------------------------------
 
-                    message.screenshot,
+const domDetections = (message.detections || []).map(function (detection) {
+    return {
+        ...detection,
+        source: "dom"
+    };
+});
 
-                    message.detections || []
+const ocrDetections = (ocrResult.detections || []).map(function (detection) {
+    return {
+        ...detection,
+        source: "ocr"
+    };
+});
 
-                );
+console.log(
+    "[FUSION] Input detections:",
+    `DOM=${domDetections.length}`,
+    `OCR=${ocrDetections.length}`
+);
 
+
+// ----------------------------------------
+// RUN FUSION
+// ----------------------------------------
+
+let fusedDetections =
+    domDetections;
+
+if (
+    window.SIHPiiFusion &&
+    typeof window.SIHPiiFusion.fuse ===
+        "function"
+) {
+
+    const fusionInput = [
+        ...domDetections,
+        ...ocrDetections
+    ];
+
+    const fusionResult = window.SIHPiiFusion.fuse([
+    ...domDetections,
+    ...ocrDetections
+]);
+
+    fusedDetections =
+        Array.isArray(
+            fusionResult?.detections
+        )
+            ? fusionResult.detections
+            : domDetections;
+
+
+    console.log(
+        "[FUSION] Unified PII set:",
+        `input=${fusionResult?.stats?.input ?? fusionInput.length}`,
+        `output=${fusionResult?.stats?.output ?? fusedDetections.length}`,
+        `merged=${fusionResult?.stats?.merged ?? 0}`,
+        `DOM=${fusionResult?.stats?.dom ?? domDetections.length}`,
+        `OCR=${fusionResult?.stats?.ocr ?? ocrDetections.length}`,
+        `latency=${Number(
+            fusionResult?.latencyMs || 0
+        ).toFixed(2)} ms`
+    );
+
+} else {
+
+    console.warn(
+        "[FUSION] Fusion module unavailable. " +
+        "Using DOM detections only."
+    );
+}
+
+
+// ----------------------------------------
+// SAFETY CHECK
+// ----------------------------------------
+//
+// Every detection reaching the redaction
+// engine must have valid geometry.
+//
+// If fusion somehow returns an invalid
+// detection, fail closed instead of
+// silently allowing it through.
+// ----------------------------------------
+
+const invalidFusedDetection =
+    fusedDetections.some(
+        detection =>
+            !detection ||
+            !detection.rect ||
+            !Number.isFinite(
+                Number(
+                    detection.rect.left
+                )
+            ) ||
+            !Number.isFinite(
+                Number(
+                    detection.rect.top
+                )
+            ) ||
+            !Number.isFinite(
+                Number(
+                    detection.rect.right
+                )
+            ) ||
+            !Number.isFinite(
+                Number(
+                    detection.rect.bottom
+                )
+            )
+    );
+
+
+if (invalidFusedDetection) {
+
+    throw new Error(
+        "PII fusion produced an invalid " +
+        "detection geometry."
+    );
+}
+
+
+console.log(
+    "📐 Sanitizing screenshot with",
+    fusedDetections.length,
+    "unified PII regions"
+);
+
+
+// ----------------------------------------
+// LOCAL REDACTION
+// ----------------------------------------
+
+return sanitizeScreenshot(
+
+    message.screenshot,
+
+    fusedDetections
+
+);            
             })
-            .then(function (sanitizedImage) {
+            
 
-                runPrivacyEngine();
+.then(function (sanitizedImage) {
 
-
-                captureInProgress =
-                    false;
+    runPrivacyEngine();
 
 
-                sendResponse({
+    captureInProgress =
+        false;
 
-                    success: true,
 
-                    sanitizedImage,
+    sendResponse({
 
-                    dom_elements:
-                        collectSafeDOM(),
+        success: true,
 
-                    viewport: {
+        sanitizedImage,
 
-                        width:
-                            window.innerWidth,
+        dom_elements:
+            collectSafeDOM(),
 
-                        height:
-                            window.innerHeight,
+        viewport: {
 
-                        devicePixelRatio:
-                            window.devicePixelRatio,
+            width:
+                window.innerWidth,
 
-                        scrollX:
-                            window.scrollX,
+            height:
+                window.innerHeight,
 
-                        scrollY:
-                            window.scrollY,
+            devicePixelRatio:
+                window.devicePixelRatio,
 
-                        documentWidth:
-                            document.documentElement
-                                ? document.documentElement.scrollWidth
-                                : window.innerWidth,
+            scrollX:
+                window.scrollX,
 
-                        documentHeight:
-                            document.documentElement
-                                ? document.documentElement.scrollHeight
-                                : window.innerHeight
+            scrollY:
+                window.scrollY,
 
-                    }
+            documentWidth:
+                document.documentElement
+                    ? document.documentElement.scrollWidth
+                    : window.innerWidth,
 
-                });
+            documentHeight:
+                document.documentElement
+                    ? document.documentElement.scrollHeight
+                    : window.innerHeight
 
-            })
+        }
+
+    });
+
+})
             .catch(function (error) {
 
                 console.error(

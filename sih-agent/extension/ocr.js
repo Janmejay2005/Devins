@@ -857,30 +857,51 @@ console.log(
 
         return {
 
-            success: true,
+    success: true,
 
-            version:
-                OCR_VERSION,
+    version:
+        OCR_VERSION,
 
-            latencyMs:
-                latency,
+    latencyMs:
+        latency,
 
-            image: {
+    image: {
 
-                width:
-                    imageWidth,
+        width:
+            imageWidth,
 
-                height:
-                    imageHeight
+        height:
+            imageHeight
 
-            },
+    },
 
-            words,
+    words,
 
-            wordCount:
-                words.length
+    wordCount:
+        words.length,
 
-        };
+    // ====================================================
+    // PHASE 2.4 — PII FUSION OUTPUT
+    // ====================================================
+    //
+    // These detections contain ONLY:
+    // - type
+    // - source
+    // - confidence
+    // - rectangle
+    //
+    // Actual OCR text remains local inside
+    // detectOCRPII().
+    // ====================================================
+
+    detections:
+        Array.isArray(
+            ocrPIIResult.detections
+        )
+            ? ocrPIIResult.detections
+            : []
+
+};
 
     }
 

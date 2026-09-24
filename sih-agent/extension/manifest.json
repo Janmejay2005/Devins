@@ -36,11 +36,12 @@
   {
     "matches": ["<all_urls>"],
     "js": [
-      "tesseract.min.js",
-      "ocr.js",
-      "perception.js",
-      "content.js"
-    ],
+    "tesseract.min.js",
+    "ocr.js",
+    "perception.js",
+    "fusion.js",
+    "content.js"
+],
     "run_at": "document_idle"
   }
 ]
