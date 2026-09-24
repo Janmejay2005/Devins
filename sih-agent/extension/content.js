@@ -5307,93 +5307,267 @@ chrome.runtime.onMessage.addListener(
         // SANITIZE SCREENSHOT
         // ====================================================
 
-        if (
-            message.type ===
-            "SANITIZE_SCREENSHOT"
-        ) {
+        // ====================================================
+// SANITIZE SCREENSHOT
+// ====================================================
+//
+// PHASE 2.2:
+// Raw screenshot is processed locally by OCR BEFORE
+// screenshot redaction.
+//
+// IMPORTANT:
+// OCR result NEVER leaves the content script.
+//
+// The backend receives only the already-sanitized image.
+// ====================================================
 
-            captureInProgress =
-                true;
+if (
+    message.type ===
+    "SANITIZE_SCREENSHOT"
+) {
 
-
-            sanitizeScreenshot(
-
-                message.screenshot,
-
-                message.detections || []
-            )
-                .then(
-                    sanitizedImage => {
-
-                        runPrivacyEngine();
-
-
-                        captureInProgress =
-                            false;
+    captureInProgress =
+        true;
 
 
-                        sendResponse({
+    // ====================================================
+    // PHASE 2.2 — LOCAL OCR
+    // ====================================================
 
-                            success: true,
-
-                            sanitizedImage,
-
-                            dom_elements:
-                                collectSafeDOM(),
-
-                            viewport: {
-
-                                width:
-                                    window.innerWidth,
-
-                                height:
-                                    window.innerHeight,
-
-                                devicePixelRatio:
-                                    window.devicePixelRatio,
-
-                                scrollX:
-                                    window.scrollX,
-
-                                scrollY:
-                                    window.scrollY,
-
-                                documentWidth:
-                                    document.documentElement
-                                        ? document.documentElement.scrollWidth
-                                        : window.innerWidth,
-
-                                documentHeight:
-                                    document.documentElement
-                                        ? document.documentElement.scrollHeight
-                                        : window.innerHeight
-                            }
-                        });
-                    }
-                )
-                .catch(
-                    error => {
-
-                        captureInProgress =
-                            false;
+    const runOCR =
+        window.SIHOCR &&
+        typeof window.SIHOCR.testScreenshot ===
+            "function";
 
 
-                        runPrivacyEngine();
+    if (runOCR) {
+
+        console.log(
+            "[OCR] Running local OCR on captured screenshot..."
+        );
 
 
-                        sendResponse({
+        window.SIHOCR.testScreenshot(
+            message.screenshot
+        )
+            .then(function (ocrResult) {
 
-                            success: false,
+                // ----------------------------------------
+                // IMPORTANT PRIVACY RULE
+                // ----------------------------------------
+                //
+                // OCR text remains inside this content
+                // script.
+                //
+                // Do NOT place ocrResult.text inside
+                // sendResponse().
+                //
+                // Do NOT send it through chrome.runtime.
+                // ----------------------------------------
 
-                            error:
-                                error.message
-                        });
-                    }
+                console.log(
+    "[OCR] Local screenshot OCR completed:",
+    `${ocrResult.latencyMs.toFixed(2)} ms`,
+    `| words=${ocrResult.words.length}`
+);
+
+                console.log(
+                    "[OCR] Bounding boxes available:",
+                    ocrResult.words.length
                 );
 
 
-            return true;
-        }
+                // ----------------------------------------
+                // Continue normal privacy sanitization.
+                // ----------------------------------------
+
+                return sanitizeScreenshot(
+
+                    message.screenshot,
+
+                    message.detections || []
+
+                );
+
+            })
+            .then(function (sanitizedImage) {
+
+                runPrivacyEngine();
+
+
+                captureInProgress =
+                    false;
+
+
+                sendResponse({
+
+                    success: true,
+
+                    sanitizedImage,
+
+                    dom_elements:
+                        collectSafeDOM(),
+
+                    viewport: {
+
+                        width:
+                            window.innerWidth,
+
+                        height:
+                            window.innerHeight,
+
+                        devicePixelRatio:
+                            window.devicePixelRatio,
+
+                        scrollX:
+                            window.scrollX,
+
+                        scrollY:
+                            window.scrollY,
+
+                        documentWidth:
+                            document.documentElement
+                                ? document.documentElement.scrollWidth
+                                : window.innerWidth,
+
+                        documentHeight:
+                            document.documentElement
+                                ? document.documentElement.scrollHeight
+                                : window.innerHeight
+
+                    }
+
+                });
+
+            })
+            .catch(function (error) {
+
+                console.error(
+                    "[OCR] Local OCR / sanitization failed:",
+                    error?.message ||
+                    error
+                );
+
+
+                captureInProgress =
+                    false;
+
+
+                runPrivacyEngine();
+
+
+                sendResponse({
+
+                    success: false,
+
+                    error:
+                        error?.message ||
+                        "OCR or screenshot sanitization failed."
+
+                });
+
+            });
+
+
+        return true;
+    }
+
+
+    // ====================================================
+    // FALLBACK
+    // ====================================================
+    //
+    // If OCR is unavailable, preserve the existing
+    // Stage 1 screenshot pipeline.
+    // ====================================================
+
+    console.warn(
+        "[OCR] OCR module unavailable. Using normal sanitization."
+    );
+
+
+    sanitizeScreenshot(
+
+        message.screenshot,
+
+        message.detections || []
+
+    )
+        .then(function (sanitizedImage) {
+
+            runPrivacyEngine();
+
+
+            captureInProgress =
+                false;
+
+
+            sendResponse({
+
+                success: true,
+
+                sanitizedImage,
+
+                dom_elements:
+                    collectSafeDOM(),
+
+                viewport: {
+
+                    width:
+                        window.innerWidth,
+
+                    height:
+                        window.innerHeight,
+
+                    devicePixelRatio:
+                        window.devicePixelRatio,
+
+                    scrollX:
+                        window.scrollX,
+
+                    scrollY:
+                        window.scrollY,
+
+                    documentWidth:
+                        document.documentElement
+                            ? document.documentElement.scrollWidth
+                            : window.innerWidth,
+
+                    documentHeight:
+                        document.documentElement
+                            ? document.documentElement.scrollHeight
+                            : window.innerHeight
+
+                }
+
+            });
+
+        })
+        .catch(function (error) {
+
+            captureInProgress =
+                false;
+
+
+            runPrivacyEngine();
+
+
+            sendResponse({
+
+                success: false,
+
+                error:
+                    error?.message ||
+                    "Screenshot sanitization failed."
+
+            });
+
+        });
+
+
+    return true;
+}
+                
 
 
         // ====================================================

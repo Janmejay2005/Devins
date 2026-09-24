@@ -32,10 +32,12 @@
     "128": "assets/devins-128.png"
   },
 
-  "content_scripts": [
+"content_scripts": [
   {
     "matches": ["<all_urls>"],
     "js": [
+      "tesseract.min.js",
+      "ocr.js",
       "perception.js",
       "content.js"
     ],
