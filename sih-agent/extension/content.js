@@ -5631,8 +5631,20 @@ if (
     "SANITIZE_SCREENSHOT"
 ) {
 
-    captureInProgress =
-        true;
+    if (captureInProgress) {
+        console.warn(
+            "[PRIVACY] Capture already in progress. Rejecting duplicate request."
+        );
+
+        sendResponse({
+            success: false,
+            error: "Capture already in progress. Please wait."
+        });
+
+        return true;
+    }
+
+    captureInProgress = true;
 
 
     // ====================================================

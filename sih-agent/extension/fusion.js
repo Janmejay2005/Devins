@@ -18,7 +18,7 @@
     "use strict";
 
 
-    const FUSION_VERSION = "2.4.0";
+    const FUSION_VERSION = "2.6.0";
 
 
     // ========================================================
@@ -436,6 +436,33 @@
 
 
     // ========================================================
+    // OCR CONFIDENCE ELIGIBILITY (PHASE 2.6)
+    // ========================================================
+
+    function isRedactionEligible(detection) {
+
+        if (!detection) {
+            return false;
+        }
+
+        // Non-OCR detections keep existing behavior.
+        if (
+            String(detection.source || "").toLowerCase() !== "ocr"
+        ) {
+            return true;
+        }
+
+        // OCR Phase 2.6:
+        // Explicit false means the OCR result is uncertain.
+        if (detection.redactionRecommended === false) {
+            return false;
+        }
+
+        return true;
+    }
+
+
+    // ========================================================
     // SOURCE PRIORITY
     // ========================================================
 
@@ -586,6 +613,12 @@
                     confidenceB
                 ),
 
+            uncertain:
+                false,
+
+            redactionRecommended:
+                true,
+
             rect:
                 mergeRectangles(
                     detectionA.rect,
@@ -631,7 +664,8 @@
                     merged: 0,
                     dom: 0,
                     ocr: 0,
-                    fused: 0
+                    fused: 0,
+                    uncertainOCR: 0
                 },
 
                 latencyMs:
@@ -669,6 +703,16 @@
                                 detection
                             ),
 
+                        uncertain:
+                            Boolean(
+                                detection.uncertain
+                            ),
+
+                        redactionRecommended:
+                            isRedactionEligible(
+                                detection
+                            ),
+
                         rect:
                             normalizeRect(
                                 detection.rect
@@ -682,6 +726,30 @@
                 );
 
 
+        // ----------------------------------------------------
+        // PHASE 2.6 — SEPARATE REDACTION-ELIGIBLE FROM
+        // UNCERTAIN OCR DETECTIONS
+        // ----------------------------------------------------
+        //
+        // Low-confidence OCR detections must never enter the
+        // final fused redaction set directly. They are still
+        // tracked for benchmarking.
+        // ----------------------------------------------------
+
+        const redactionEligibleDetections =
+            validDetections.filter(
+                detection =>
+                    detection.redactionRecommended !== false
+            );
+
+        const uncertainOCRDetections =
+            validDetections.filter(
+                detection =>
+                    detection.source === "ocr" &&
+                    detection.redactionRecommended === false
+            );
+
+
         const fused = [];
 
         let mergedCount = 0;
@@ -689,7 +757,7 @@
 
         for (
             const detection
-            of validDetections
+            of redactionEligibleDetections
         ) {
 
             let merged = false;
@@ -740,6 +808,12 @@
                     confidence:
                         detection.confidence,
 
+                    uncertain:
+                        false,
+
+                    redactionRecommended:
+                        true,
+
                     rect:
                         detection.rect,
 
@@ -764,13 +838,13 @@
                 mergedCount,
 
             dom:
-                validDetections.filter(
+                redactionEligibleDetections.filter(
                     detection =>
                         detection.source === "dom"
                 ).length,
 
             ocr:
-                validDetections.filter(
+                redactionEligibleDetections.filter(
                     detection =>
                         detection.source === "ocr"
                 ).length,
@@ -779,7 +853,10 @@
                 fused.filter(
                     detection =>
                         detection.source === "fused"
-                ).length
+                ).length,
+
+            uncertainOCR:
+                uncertainOCRDetections.length
         };
 
 
@@ -796,6 +873,7 @@
             `dom=${stats.dom}`,
             `ocr=${stats.ocr}`,
             `fused=${stats.fused}`,
+            `uncertainOCR=${stats.uncertainOCR}`,
             `latency=${latencyMs.toFixed(2)} ms`
         );
 
@@ -841,6 +919,14 @@
                     Number(
                         detection.confidence
                     ),
+
+                uncertain:
+                    Boolean(
+                        detection.uncertain
+                    ),
+
+                redactionRecommended:
+                    detection.redactionRecommended !== false,
 
                 sources:
                     Array.isArray(

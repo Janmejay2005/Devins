@@ -669,7 +669,7 @@ async function captureAndSanitize() {
                         screenshot,
 
                     detections:
-                        prepareResponse.detections || []
+                        safeDetections
                 }
             );
 

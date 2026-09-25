@@ -65,6 +65,27 @@ const taskInput =
         "taskInput"
     );
 
+const taskCounter =
+    document.querySelector(
+        ".task-counter"
+    );
+
+if (taskInput && taskCounter) {
+
+    const updateTaskCounter = () => {
+
+        taskCounter.textContent =
+            `${taskInput.value.length} / 500`;
+
+    };
+
+    taskInput.addEventListener(
+        "input",
+        updateTaskCounter
+    );
+
+    updateTaskCounter();
+}
 
 if (!captureButton) {
 

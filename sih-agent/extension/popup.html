@@ -1754,54 +1754,9 @@
          SCRIPT
          ========================================================= -->
 
-    <script>
-
-        /*
-         * Keep this page connected to the existing popup.js.
-         * The IDs below are intentionally unchanged:
-         *
-         * taskInput
-         * captureButton
-         * result
-         * resultTitle
-         * resultContent
-         */
-
-        const taskInput =
-            document.getElementById(
-                "taskInput"
-            );
-
-        const taskCounter =
-            document.querySelector(
-                ".task-counter"
-            );
-
-        if (taskInput && taskCounter) {
-
-            const updateCounter =
-                () => {
-
-                    taskCounter.textContent =
-                        `${taskInput.value.length} / 500`;
-
-                };
-
-            taskInput.addEventListener(
-                "input",
-                updateCounter
-            );
-
-            updateCounter();
-
-        }
-
-    </script>
-
     <script
-        defer
-        src="popup.js"
-    ></script>
-
+    defer
+    src="popup.js"
+></script>
 </body>
 </html>

@@ -35,11 +35,13 @@
     // VERSION / STATE
     // ========================================================
 
-    const OCR_VERSION = "2.2.0";
+    const OCR_VERSION = "2.6.0";
 
     let worker = null;
 
     let initializing = null;
+
+    let OCR_CONFIDENCE_THRESHOLD = 0.70;
 
 
     // ========================================================
@@ -55,7 +57,16 @@
 
     piiRuns: 0,
     totalPIIDetections: 0,
-    lastPIIDetections: 0
+    lastPIIDetections: 0,
+
+    lowConfidencePIIDetections: 0,
+    acceptedPIIDetections: 0,
+    confidenceSamples: [],
+    lastAverageConfidence: 0,
+    lastMinConfidence: 0,
+
+    lastAcceptedPIIDetections: 0,
+    lastRejectedPIIDetections: 0
 };
 
 
@@ -610,11 +621,22 @@
                 )
             );
 
+            const normalizedConfidence =
+                confidence / 100;
+
+            const isLowConfidence =
+                normalizedConfidence <
+                OCR_CONFIDENCE_THRESHOLD;
+
             detections.push({
                 type: detector.type,
                 source: "ocr",
                 confidence:
-                    confidence / 100,
+                    normalizedConfidence,
+                uncertain:
+                    isLowConfidence,
+                redactionRecommended:
+                    !isLowConfidence,
                 rect: {
                     left,
                     top,
@@ -818,6 +840,62 @@ console.log(
         ocrMetrics.totalWords +=
             words.length;
 
+        ocrMetrics.piiRuns += 1;
+
+        ocrMetrics.totalPIIDetections +=
+            ocrPIIResult.detections.length;
+
+        ocrMetrics.lastPIIDetections =
+            ocrPIIResult.detections.length;
+
+        const runConfidences =
+            ocrPIIResult.detections.map(
+                d => d.confidence
+            );
+
+        ocrMetrics.lastAverageConfidence =
+            runConfidences.length > 0
+                ? runConfidences.reduce(
+                      (a, b) => a + b,
+                      0
+                  ) / runConfidences.length
+                : 0;
+
+        ocrMetrics.lastMinConfidence =
+            runConfidences.length > 0
+                ? Math.min(...runConfidences)
+                : 0;
+
+        for (const sample of runConfidences) {
+
+            ocrMetrics.confidenceSamples.push(
+                sample
+            );
+
+        }
+
+        const runAccepted =
+            ocrPIIResult.detections.filter(
+                d => !d.uncertain
+            ).length;
+
+        const runRejected =
+            ocrPIIResult.detections.filter(
+                d => d.uncertain
+            ).length;
+
+        ocrMetrics.lastAcceptedPIIDetections =
+            runAccepted;
+
+        ocrMetrics.lastRejectedPIIDetections =
+            runRejected;
+
+        ocrMetrics.acceptedPIIDetections +=
+            runAccepted;
+
+        ocrMetrics.lowConfidencePIIDetections +=
+            runRejected;
+
 
         // ----------------------------------------------------
         // SAFE LOGGING
@@ -899,7 +977,22 @@ console.log(
             ocrPIIResult.detections
         )
             ? ocrPIIResult.detections
-            : []
+            : [],
+
+    confidenceFiltering: {
+        threshold:
+            OCR_CONFIDENCE_THRESHOLD,
+        accepted:
+            runAccepted,
+        rejected:
+            runRejected,
+        cumulative: {
+            accepted:
+                ocrMetrics.acceptedPIIDetections,
+            rejected:
+                ocrMetrics.lowConfidencePIIDetections
+        }
+    }
 
 };
 
@@ -953,9 +1046,81 @@ console.log(
                 ),
 
             totalWords:
-                ocrMetrics.totalWords
+                ocrMetrics.totalWords,
+
+            piiRuns:
+                ocrMetrics.piiRuns,
+
+            totalPIIDetections:
+                ocrMetrics.totalPIIDetections,
+
+            lastPIIDetections:
+                ocrMetrics.lastPIIDetections,
+
+            lowConfidencePIIDetections:
+                ocrMetrics.lowConfidencePIIDetections,
+
+            acceptedPIIDetections:
+                ocrMetrics.acceptedPIIDetections,
+
+            lastAcceptedPIIDetections:
+                ocrMetrics.lastAcceptedPIIDetections,
+
+            lastRejectedPIIDetections:
+                ocrMetrics.lastRejectedPIIDetections,
+
+            lastAverageConfidence:
+                Number(
+                    ocrMetrics.lastAverageConfidence.toFixed(4)
+                ),
+
+            lastMinConfidence:
+                Number(
+                    ocrMetrics.lastMinConfidence.toFixed(4)
+                ),
+
+            confidenceThreshold:
+                OCR_CONFIDENCE_THRESHOLD
 
         };
+
+    }
+
+
+    // ========================================================
+    // CONFIDENCE THRESHOLD CONTROL (BENCHMARK TUNING)
+    // ========================================================
+
+    function setConfidenceThreshold(value) {
+
+        const parsed = Number(value);
+
+        if (
+            !Number.isFinite(parsed) ||
+            parsed < 0 ||
+            parsed > 1
+        ) {
+
+            throw new Error(
+                "OCR confidence threshold must be a number between 0 and 1."
+            );
+
+        }
+
+        OCR_CONFIDENCE_THRESHOLD = parsed;
+
+        console.log(
+            "[OCR] Confidence threshold set to:",
+            OCR_CONFIDENCE_THRESHOLD
+        );
+
+        return OCR_CONFIDENCE_THRESHOLD;
+
+    }
+
+    function getConfidenceThreshold() {
+
+        return OCR_CONFIDENCE_THRESHOLD;
 
     }
 
@@ -988,7 +1153,13 @@ console.log(
             testScreenshot,
 
         getMetrics:
-            getMetrics
+            getMetrics,
+
+        setConfidenceThreshold:
+            setConfidenceThreshold,
+
+        getConfidenceThreshold:
+            getConfidenceThreshold
 
     };
 
