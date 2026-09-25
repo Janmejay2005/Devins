@@ -325,6 +325,11 @@ let privacyEngineRunning = false;
 
 let captureInProgress = false;
 
+// Separate from captureInProgress: an OCR benchmark run must
+// never contaminate or block the production capture pipeline,
+// and vice versa.
+let ocrBenchmarkInProgress = false;
+
 let lastDetectionSignature = "";
 
 
@@ -5525,6 +5530,366 @@ chrome.runtime.onMessage.addListener(
                     getBenchmarkSnapshot()
             });
 
+
+            return true;
+        }
+
+
+        // ====================================================
+        // RUN OCR BENCHMARK
+        // ====================================================
+        //
+        // PHASE 2.7:
+        //
+        // This handler exists ONLY to let the benchmark page
+        // (pii-accuracy-test.html, via background.js) measure
+        // OCR accuracy/performance.
+        //
+        // It is intentionally isolated from the production
+        // capture pipeline:
+        //
+        //   - It never calls runPrivacyEngine(), fusion, or
+        //     sanitizeScreenshot().
+        //   - It never triggers EXECUTE_ACTION or any browser
+        //     automation.
+        //   - It reuses window.SIHOCR.testScreenshot() as-is;
+        //     no second OCR metrics engine is created here.
+        //   - Raw OCR text stays inside ocr.js. Only
+        //     type/confidence/uncertain metadata and the
+        //     existing ocrBenchmark report leave this function.
+        //
+        // ====================================================
+
+        if (
+            message?.type ===
+            "RUN_OCR_BENCHMARK"
+        ) {
+
+            // ------------------------------------------------
+            // VALIDATE PAYLOAD
+            // ------------------------------------------------
+
+            const screenshot =
+                message?.screenshot;
+
+            if (
+                typeof screenshot !== "string" ||
+                screenshot.length === 0
+            ) {
+
+                sendResponse({
+
+                    success:
+                        false,
+
+                    error:
+                        "OCR benchmark request is missing a screenshot.",
+
+                    code:
+                        "INVALID_BENCHMARK_REQUEST"
+                });
+
+                return false;
+            }
+
+
+            if (
+                !window.SIHOCR ||
+                typeof window.SIHOCR.testScreenshot !==
+                    "function"
+            ) {
+
+                console.warn(
+                    "[OCR-BENCH] SIHOCR is not available on this page."
+                );
+
+                sendResponse({
+
+                    success:
+                        false,
+
+                    error:
+                        "OCR module is not available on this page.",
+
+                    code:
+                        "OCR_BENCHMARK_FAILED"
+                });
+
+                return false;
+            }
+
+
+            // ------------------------------------------------
+            // STATE ISOLATION
+            // ------------------------------------------------
+            //
+            // Never let a benchmark run overlap with either
+            // another benchmark run or a production capture,
+            // and never let it appear as a production capture
+            // to the rest of the content script.
+            //
+            // ------------------------------------------------
+
+            if (
+                ocrBenchmarkInProgress ||
+                captureInProgress
+            ) {
+
+                console.warn(
+                    "[OCR-BENCH] A capture or benchmark run is already in progress."
+                );
+
+                sendResponse({
+
+                    success:
+                        false,
+
+                    error:
+                        "A capture or OCR benchmark is already running. Please wait.",
+
+                    code:
+                        "OCR_BENCHMARK_FAILED",
+
+                    retryable:
+                        true
+                });
+
+                return false;
+            }
+
+            ocrBenchmarkInProgress = true;
+
+
+            if (message.resetBenchmark === true) {
+
+                window.SIHOCR.resetBenchmark();
+            }
+
+
+            // ------------------------------------------------
+            // TIMEOUT PROTECTION
+            // ------------------------------------------------
+            //
+            // OCR is CPU-heavy. A stuck Tesseract run must
+            // never hang the benchmark page or the extension
+            // message channel forever.
+            //
+            // ------------------------------------------------
+
+            const OCR_BENCH_TIMEOUT_MS = 12000;
+
+            const timeoutPromise =
+                new Promise(
+                    (_, reject) =>
+                        setTimeout(
+                            () =>
+                                reject(
+                                    new Error(
+                                        "OCR benchmark timed out."
+                                    )
+                                ),
+                            OCR_BENCH_TIMEOUT_MS
+                        )
+                );
+
+
+            Promise.race([
+
+                window.SIHOCR.testScreenshot(
+                    screenshot
+                ),
+
+                timeoutPromise
+
+            ])
+
+                .then(
+                    function (ocrResult) {
+
+                        // ------------------------------
+                        // IMPORTANT PRIVACY RULE
+                        // ------------------------------
+                        //
+                        // OCR text (ocrResult.text,
+                        // ocrResult.words) stays inside
+                        // this content script. Only
+                        // classification-level metadata
+                        // and aggregate metrics leave
+                        // this handler.
+                        // ------------------------------
+
+                        const metrics =
+                            typeof window.SIHOCR.getMetrics ===
+                                "function"
+                                ? window.SIHOCR.getMetrics()
+                                : {};
+
+                        const report =
+                            typeof window.SIHOCR.getBenchmarkReport ===
+                                "function"
+                                ? window.SIHOCR.getBenchmarkReport()
+                                : null;
+
+                        const safeDetections =
+                            (
+                                Array.isArray(
+                                    ocrResult?.detections
+                                )
+                                    ? ocrResult.detections
+                                    : []
+                            )
+                                .map(
+                                    function (detection) {
+
+                                        return {
+
+                                            type:
+                                                String(
+                                                    detection?.type ||
+                                                    ""
+                                                ).toUpperCase(),
+
+                                            confidence:
+                                                Number(
+                                                    detection?.confidence
+                                                ) || 0,
+
+                                            uncertain:
+                                                Boolean(
+                                                    detection?.uncertain
+                                                ),
+
+                                            detected:
+                                                detection?.redactionRecommended !==
+                                                    false
+                                        };
+                                    }
+                                );
+
+                        const acceptedPII =
+                            Number(
+                                ocrResult?.confidenceFiltering
+                                    ?.accepted
+                            ) || 0;
+
+                        const rejectedPII =
+                            Number(
+                                ocrResult?.confidenceFiltering
+                                    ?.rejected
+                            ) || 0;
+
+
+                        console.log(
+                            "[OCR-BENCH]",
+                            `run=${metrics.runs || 0}`,
+                            `words=${ocrResult.wordCount || 0}`,
+                            `pii=${safeDetections.length}`,
+                            `accepted=${acceptedPII}`,
+                            `rejected=${rejectedPII}`,
+                            `latency=${Number(
+                                ocrResult.latencyMs || 0
+                            ).toFixed(2)}ms`,
+                            `confidence=${Number(
+                                metrics.lastAverageConfidence || 0
+                            ).toFixed(2)}`
+                        );
+
+
+                        ocrBenchmarkInProgress = false;
+
+
+                        sendResponse({
+
+                            success:
+                                true,
+
+                            ocr: {
+
+                                latencyMs:
+                                    Number(
+                                        ocrResult.latencyMs
+                                    ) || 0,
+
+                                totalWords:
+                                    Number(
+                                        ocrResult.wordCount
+                                    ) || 0,
+
+                                piiDetections:
+                                    safeDetections.length,
+
+                                acceptedPII,
+
+                                rejectedPII,
+
+                                averageConfidence:
+                                    Number(
+                                        metrics.lastAverageConfidence
+                                    ) || 0,
+
+                                minConfidence:
+                                    Number(
+                                        metrics.lastMinConfidence
+                                    ) || 0,
+
+                                detections:
+                                    safeDetections
+                            },
+
+                            // Also surfaced at the top level so
+                            // background.js's existing benchmark
+                            // sanitizer (which reads
+                            // response.detections / response.report)
+                            // keeps working unchanged.
+                            detections:
+                                safeDetections,
+
+                            report
+                        });
+                    }
+                )
+
+                .catch(
+                    function (error) {
+
+                        const isTimeout =
+                            String(
+                                error?.message || ""
+                            ).includes("timed out");
+
+                        console.error(
+                            "[OCR-BENCH] Benchmark run failed:",
+                            error?.message ||
+                            error
+                        );
+
+
+                        ocrBenchmarkInProgress = false;
+
+
+                        sendResponse({
+
+                            success:
+                                false,
+
+                            error:
+                                error?.message ||
+                                "OCR benchmark failed.",
+
+                            code:
+                                isTimeout
+                                    ? "OCR_TIMEOUT"
+                                    : "OCR_BENCHMARK_FAILED",
+
+                            retryable:
+                                isTimeout
+                        });
+                    }
+                );
+
+
+            // Keep the message channel open for the
+            // asynchronous response.
 
             return true;
         }

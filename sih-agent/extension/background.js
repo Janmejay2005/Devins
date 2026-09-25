@@ -64,6 +64,24 @@ const MAX_WAIT_MS = 5000;
 const MIN_WAIT_MS = 100;
 
 
+// Maximum time allowed for an OCR benchmark round trip
+// (background -> content.js -> ocr.js -> background).
+const OCR_BENCHMARK_TIMEOUT_MS = 15000;
+
+
+// Allowed PII types the OCR benchmark is permitted to
+// request/report on. Keeps the benchmark route aligned
+// with what ocr.js actually detects (no name detection).
+const ALLOWED_BENCHMARK_TYPES = new Set([
+    "EMAIL",
+    "PHONE",
+    "AADHAAR",
+    "PAN",
+    "CREDIT_CARD",
+    "PASSWORD"
+]);
+
+
 // ============================================================
 // MESSAGE SENDER VALIDATION
 // ============================================================
@@ -1548,6 +1566,524 @@ async function executeBrowserAction(
 
 
 // ============================================================
+// BENCHMARK
+// ============================================================
+//
+// This section is intentionally separate from the production
+// CAPTURE_AND_SANITIZE / EXECUTE_BROWSER_ACTION pipeline.
+//
+// Purpose:
+//   Bridge pii-accuracy-test.html to the existing OCR pipeline
+//   (content.js -> ocr.js) without introducing a second raw
+//   screenshot exit point and without duplicating the detailed
+//   metrics that already live inside ocr.js.
+//
+// Boundary:
+//   - Never returns raw screenshots.
+//   - Never returns detected PII text/values.
+//   - Only returns type / confidence / detected booleans and
+//     the aggregate benchmark report produced by ocr.js.
+//
+// ============================================================
+
+
+// Lightweight, background-level counters only.
+// Detailed OCR metrics remain the responsibility of ocr.js.
+const benchmarkStats = {
+    runs: 0,
+    successful: 0,
+    failed: 0,
+    totalLatencyMs: 0
+};
+
+
+// ------------------------------------------------------------
+// TIMEOUT WRAPPER
+// ------------------------------------------------------------
+//
+// Prevents the benchmark UI from hanging forever if OCR /
+// Tesseract gets stuck inside the content script.
+//
+// ------------------------------------------------------------
+
+function withTimeout(
+    promise,
+    timeoutMs = OCR_BENCHMARK_TIMEOUT_MS
+) {
+
+    return Promise.race([
+
+        promise,
+
+        new Promise(
+            (_, reject) =>
+                setTimeout(
+                    () =>
+                        reject(
+                            new Error(
+                                "Benchmark timeout."
+                            )
+                        ),
+                    timeoutMs
+                )
+        )
+    ]);
+}
+
+
+// ------------------------------------------------------------
+// SANITIZE BENCHMARK RESULT
+// ------------------------------------------------------------
+//
+// Defense-in-depth, mirroring sanitizeDetectionMetadata().
+//
+// Only classification-level fields are kept. Detected PII
+// text, OCR words, and raw screenshots are never copied here,
+// even if a compromised or buggy content script were to send
+// them.
+//
+// ------------------------------------------------------------
+
+function sanitizeBenchmarkDetections(
+    detections
+) {
+
+    if (
+        !Array.isArray(detections)
+    ) {
+        return [];
+    }
+
+
+    return detections
+        .map(
+            detection => {
+
+                if (
+                    !detection ||
+                    typeof detection !== "object"
+                ) {
+                    return null;
+                }
+
+
+                const type =
+                    String(
+                        detection.type || ""
+                    )
+                        .toUpperCase()
+                        .trim();
+
+
+                if (
+                    !ALLOWED_BENCHMARK_TYPES.has(type)
+                ) {
+                    return null;
+                }
+
+
+                const rawConfidence =
+                    Number(
+                        detection.confidence
+                    );
+
+
+                const confidence =
+                    Number.isFinite(rawConfidence)
+                        ? Math.min(
+                            1,
+                            Math.max(0, rawConfidence)
+                        )
+                        : 0;
+
+
+                return {
+
+                    type,
+
+                    confidence,
+
+                    detected:
+                        detection.detected === true
+                };
+            }
+        )
+        .filter(Boolean);
+}
+
+
+function sanitizeBenchmarkReport(
+    report
+) {
+
+    if (
+        !report ||
+        typeof report !== "object"
+    ) {
+        return null;
+    }
+
+
+    // Only numeric aggregate fields are forwarded. This
+    // object never contains OCR text or PII values, so it
+    // is safe to pass through, but we still rebuild it
+    // field-by-field rather than trusting the shape as-is.
+
+    const latency =
+        report.latency && typeof report.latency === "object"
+            ? report.latency
+            : {};
+
+    const words =
+        report.words && typeof report.words === "object"
+            ? report.words
+            : {};
+
+    const pii =
+        report.pii && typeof report.pii === "object"
+            ? report.pii
+            : {};
+
+    const confidence =
+        report.confidence && typeof report.confidence === "object"
+            ? report.confidence
+            : {};
+
+
+    return {
+
+        runs:
+            Number(report.runs) || 0,
+
+        latency: {
+            averageMs:
+                Number(latency.averageMs) || 0,
+            minMs:
+                Number(latency.minMs) || 0,
+            maxMs:
+                Number(latency.maxMs) || 0,
+            totalMs:
+                Number(latency.totalMs) || 0
+        },
+
+        words: {
+            total:
+                Number(words.total) || 0
+        },
+
+        pii: {
+            total:
+                Number(pii.total) || 0,
+            accepted:
+                Number(pii.accepted) || 0,
+            rejected:
+                Number(pii.rejected) || 0
+        },
+
+        confidence: {
+            average:
+                Number(confidence.average) || 0,
+            threshold:
+                Number(confidence.threshold) || 0
+        }
+    };
+}
+
+
+// ------------------------------------------------------------
+// RUN OCR BENCHMARK
+// ------------------------------------------------------------
+//
+// Flow:
+//
+//   Benchmark HTML
+//         |
+//         v
+//   background.js  (this function)
+//         |
+//         v
+//   active tab -> content.js -> ocr.js
+//         |
+//         v
+//   OCR benchmark result
+//         |
+//         v
+//   background.js -> Benchmark HTML
+//
+// ------------------------------------------------------------
+
+async function runOCRBenchmark(
+    requestId,
+    testCases
+) {
+
+    console.log(
+        `[BENCHMARK] Request ${requestId} started`
+    );
+
+
+    // ========================================================
+    // GET ACTIVE TAB
+    // ========================================================
+    //
+    // The benchmark is never allowed to specify an arbitrary
+    // tabId. Only the active tab in the current window may be
+    // targeted, matching the production capture flow.
+    //
+    // ========================================================
+
+    const tabs =
+        await chrome.tabs.query({
+            active: true,
+            currentWindow: true
+        });
+
+
+    if (
+        !Array.isArray(tabs) ||
+        tabs.length === 0
+    ) {
+
+        const error =
+            new Error(
+                "No active browser tab found."
+            );
+
+        error.code =
+            "NO_ACTIVE_TAB";
+
+        throw error;
+    }
+
+
+    const tab =
+        tabs[0];
+
+
+    if (
+        !tab ||
+        !tab.id
+    ) {
+
+        const error =
+            new Error(
+                "Active tab has no valid ID."
+            );
+
+        error.code =
+            "NO_ACTIVE_TAB";
+
+        throw error;
+    }
+
+
+    if (
+        !Number.isInteger(tab.windowId)
+    ) {
+
+        const error =
+            new Error(
+                "Active tab has no valid window ID."
+            );
+
+        error.code =
+            "NO_ACTIVE_TAB";
+
+        throw error;
+    }
+
+
+    // ========================================================
+    // CAPTURE VISIBLE TAB
+    // ========================================================
+    //
+    // The OCR benchmark needs a screenshot of whatever is
+    // currently visible in the active tab, exactly like the
+    // production capture flow. The benchmark page is expected
+    // to scroll the relevant ground-truth/negative-sample
+    // section into view before requesting each run.
+    //
+    // ========================================================
+
+    let screenshot;
+
+
+    try {
+
+        screenshot =
+            await chrome.tabs.captureVisibleTab(
+                tab.windowId,
+                {
+                    format: "png"
+                }
+            );
+
+    } catch (error) {
+
+        const wrapped =
+            new Error(
+                "Could not capture the current screen: " +
+                (
+                    error?.message ||
+                    "Unknown capture error"
+                )
+            );
+
+        wrapped.code =
+            "OCR_BENCHMARK_FAILED";
+
+        throw wrapped;
+    }
+
+
+    if (
+        typeof screenshot !== "string" ||
+        screenshot.length === 0
+    ) {
+
+        const error =
+            new Error(
+                "Browser returned an empty screenshot."
+            );
+
+        error.code =
+            "OCR_BENCHMARK_FAILED";
+
+        throw error;
+    }
+
+
+    // ========================================================
+    // FORWARD TO CONTENT SCRIPT
+    // ========================================================
+
+    let response;
+
+
+    try {
+
+        response =
+            await withTimeout(
+                chrome.tabs.sendMessage(
+                    tab.id,
+                    {
+                        type:
+                            "RUN_OCR_BENCHMARK",
+
+                        requestId,
+
+                        testCases,
+
+                        screenshot
+                    }
+                ),
+                OCR_BENCHMARK_TIMEOUT_MS
+            );
+
+    } catch (error) {
+
+        const isTimeout =
+            String(
+                error?.message || ""
+            ).includes("timeout");
+
+        const wrapped =
+            new Error(
+                isTimeout
+                    ? "OCR benchmark timed out."
+                    : "Could not communicate with content script. " +
+                      "Please refresh the webpage and try again."
+            );
+
+        wrapped.code =
+            isTimeout
+                ? "OCR_TIMEOUT"
+                : "CONTENT_SCRIPT_UNAVAILABLE";
+
+        throw wrapped;
+    }
+
+
+    if (
+        !response ||
+        typeof response !== "object"
+    ) {
+
+        const error =
+            new Error(
+                "Content script returned an invalid benchmark response."
+            );
+
+        error.code =
+            "OCR_BENCHMARK_FAILED";
+
+        throw error;
+    }
+
+
+    if (
+        response.success !== true
+    ) {
+
+        const error =
+            new Error(
+                response.error ||
+                "OCR benchmark failed."
+            );
+
+        error.code =
+            response.code ||
+            "OCR_BENCHMARK_FAILED";
+
+        throw error;
+    }
+
+
+    // ========================================================
+    // SANITIZE RESULT
+    // ========================================================
+    //
+    // Only classification-level fields and the aggregate
+    // report leave this boundary. No screenshots, no OCR
+    // text, no detected PII values.
+    //
+    // ========================================================
+
+    const safeDetections =
+        sanitizeBenchmarkDetections(
+            response.detections
+        );
+
+    const safeReport =
+        sanitizeBenchmarkReport(
+            response.report
+        );
+
+
+    console.log(
+        `[BENCHMARK] Request ${requestId} completed`
+    );
+
+
+    return {
+
+        requestId,
+
+        success:
+            true,
+
+        detections:
+            safeDetections,
+
+        report:
+            safeReport
+    };
+}
+
+
+
+
+// ============================================================
 // MESSAGE LISTENER
 // ============================================================
 
@@ -1757,6 +2293,233 @@ chrome.runtime.onMessage.addListener(
                             error:
                                 error?.message ||
                                 "Browser action failed."
+                        });
+                    }
+                );
+
+
+            // Keep the message channel open for
+            // the asynchronous response.
+
+            return true;
+        }
+
+
+        // ====================================================
+        // BENCHMARK: RUN OCR BENCHMARK
+        // ====================================================
+        //
+        // Kept separate from CAPTURE_AND_SANITIZE so benchmark
+        // code can never accidentally weaken the production
+        // privacy boundary.
+        //
+        // ====================================================
+
+        if (
+            message?.type ===
+            "RUN_OCR_BENCHMARK"
+        ) {
+
+            // ------------------------------------------------
+            // BASIC MESSAGE SHAPE
+            // ------------------------------------------------
+
+            if (
+                !message ||
+                typeof message !== "object"
+            ) {
+
+                sendResponse({
+
+                    success:
+                        false,
+
+                    error:
+                        "Invalid benchmark request.",
+
+                    code:
+                        "INVALID_BENCHMARK_REQUEST",
+
+                    retryable:
+                        false
+                });
+
+                return false;
+            }
+
+
+            // ------------------------------------------------
+            // TRUST BOUNDARY
+            // ------------------------------------------------
+
+            if (
+                !isTrustedExtensionSender(
+                    sender
+                )
+            ) {
+
+                console.warn(
+                    "[BENCHMARK] Rejected request from an unexpected sender."
+                );
+
+                sendResponse({
+
+                    success:
+                        false,
+
+                    error:
+                        "Unauthorized request.",
+
+                    code:
+                        "INVALID_BENCHMARK_REQUEST",
+
+                    retryable:
+                        false
+                });
+
+                return false;
+            }
+
+
+            // ------------------------------------------------
+            // PAYLOAD VALIDATION
+            // ------------------------------------------------
+
+            const testCases =
+                Array.isArray(message.testCases)
+                    ? message.testCases
+                          .map(
+                              testCase =>
+                                  String(testCase || "")
+                                      .toUpperCase()
+                                      .trim()
+                          )
+                          .filter(
+                              testCase =>
+                                  ALLOWED_BENCHMARK_TYPES.has(
+                                      testCase
+                                  )
+                          )
+                    : [];
+
+
+            if (testCases.length === 0) {
+
+                sendResponse({
+
+                    success:
+                        false,
+
+                    error:
+                        "No benchmark test cases supplied.",
+
+                    code:
+                        "INVALID_BENCHMARK_REQUEST",
+
+                    retryable:
+                        false
+                });
+
+                return false;
+            }
+
+
+            const requestId =
+                crypto.randomUUID();
+
+
+            console.log(
+                "[BENCHMARK] OCR test started"
+            );
+
+            console.log(
+                `[BENCHMARK] Request ${requestId}`,
+                `testCases=${testCases.length}`
+            );
+
+
+            // ------------------------------------------------
+            // EXECUTE ASYNC
+            // ------------------------------------------------
+
+            benchmarkStats.runs += 1;
+
+            const benchmarkStart =
+                Date.now();
+
+
+            runOCRBenchmark(
+                requestId,
+                testCases
+            )
+
+                .then(
+                    result => {
+
+                        benchmarkStats.successful += 1;
+
+                        benchmarkStats.totalLatencyMs +=
+                            Date.now() - benchmarkStart;
+
+
+                        result.detections?.forEach(
+                            detection => {
+
+                                console.log(
+                                    `[BENCHMARK] Test case: ${detection.type}`
+                                );
+
+                                console.log(
+                                    `[BENCHMARK] Detected: ${detection.detected}`
+                                );
+
+                                console.log(
+                                    `[BENCHMARK] Confidence: ${detection.confidence}`
+                                );
+                            }
+                        );
+
+
+                        sendResponse(
+                            result
+                        );
+                    }
+                )
+
+                .catch(
+                    error => {
+
+                        benchmarkStats.failed += 1;
+
+                        benchmarkStats.totalLatencyMs +=
+                            Date.now() - benchmarkStart;
+
+
+                        console.error(
+                            "[BENCHMARK] Pipeline error:",
+                            error?.message ||
+                            error
+                        );
+
+
+                        sendResponse({
+
+                            requestId,
+
+                            success:
+                                false,
+
+                            error:
+                                error?.message ||
+                                "OCR benchmark failed.",
+
+                            code:
+                                error?.code ||
+                                "OCR_BENCHMARK_FAILED",
+
+                            retryable:
+                                error?.code === "OCR_TIMEOUT" ||
+                                error?.code === "CONTENT_SCRIPT_UNAVAILABLE"
                         });
                     }
                 );

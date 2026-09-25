@@ -91,6 +91,98 @@
             border-radius: 7px;
             color: #9a3412;
         }
+
+        .benchmark-controls {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 30px;
+        }
+
+        button {
+            padding: 10px 18px;
+            border: none;
+            border-radius: 7px;
+            font-size: 15px;
+            font-weight: 600;
+            cursor: pointer;
+            background: #2563eb;
+            color: white;
+        }
+
+        button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        button.secondary {
+            background: #e5e7eb;
+            color: #1f2937;
+        }
+
+        #benchmarkStatus {
+            color: #6b7280;
+            font-size: 14px;
+        }
+
+        .results-section {
+            border-left: 4px solid #16a34a;
+        }
+
+        .accuracy-section {
+            border-left: 4px solid #9333ea;
+        }
+
+        .results-grid,
+        .accuracy-grid,
+        .score-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: 14px;
+            margin-top: 12px;
+        }
+
+        .result-card,
+        .accuracy-card,
+        .score-card {
+            padding: 14px;
+            background: #f9fafb;
+            border-radius: 7px;
+            text-align: center;
+        }
+
+        .result-card span,
+        .accuracy-card span,
+        .score-card span {
+            display: block;
+            font-size: 13px;
+            color: #6b7280;
+            margin-bottom: 6px;
+        }
+
+        .result-card strong,
+        .accuracy-card strong,
+        .score-card strong {
+            font-size: 18px;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 12px;
+        }
+
+        th, td {
+            text-align: left;
+            padding: 10px 8px;
+            border-bottom: 1px solid #e5e7eb;
+            font-size: 14px;
+        }
+
+        th {
+            color: #6b7280;
+            font-weight: 600;
+        }
     </style>
 </head>
 
@@ -104,6 +196,20 @@
         Controlled test page for measuring local PII detection precision,
         recall and F1-score.
     </p>
+
+    <div class="benchmark-controls">
+        <button id="runBenchmark">
+            Run OCR Benchmark
+        </button>
+
+        <button id="resetBenchmark" class="secondary">
+            Reset
+        </button>
+
+        <span id="benchmarkStatus">
+            Ready
+        </span>
+    </div>
 
 
     <!-- ===================================================== -->
@@ -220,6 +326,185 @@
     </div>
 
 
+    <!-- ===================================================== -->
+    <!-- BENCHMARK RESULTS -->
+    <!-- ===================================================== -->
+
+    <div class="section results-section">
+
+        <h2>Benchmark Results</h2>
+
+        <div class="results-grid">
+
+            <div class="result-card">
+                <span>OCR Runs</span>
+                <strong id="resultRuns">—</strong>
+            </div>
+
+            <div class="result-card">
+                <span>Avg OCR Latency</span>
+                <strong id="resultAvgLatency">—</strong>
+            </div>
+
+            <div class="result-card">
+                <span>Min Latency</span>
+                <strong id="resultMinLatency">—</strong>
+            </div>
+
+            <div class="result-card">
+                <span>Max Latency</span>
+                <strong id="resultMaxLatency">—</strong>
+            </div>
+
+            <div class="result-card">
+                <span>Total Words</span>
+                <strong id="resultWords">—</strong>
+            </div>
+
+            <div class="result-card">
+                <span>Avg Confidence</span>
+                <strong id="resultConfidence">—</strong>
+            </div>
+
+            <div class="result-card">
+                <span>Accepted PII</span>
+                <strong id="resultAccepted">—</strong>
+            </div>
+
+            <div class="result-card">
+                <span>Rejected PII</span>
+                <strong id="resultRejected">—</strong>
+            </div>
+
+        </div>
+
+    </div>
+
+
+    <!-- ===================================================== -->
+    <!-- PII DETECTION ACCURACY -->
+    <!-- ===================================================== -->
+
+    <div class="section accuracy-section">
+
+        <h2>PII Detection Accuracy</h2>
+
+        <div class="accuracy-grid">
+
+            <div class="accuracy-card">
+                <span>True Positives</span>
+                <strong id="truePositive">—</strong>
+            </div>
+
+            <div class="accuracy-card">
+                <span>False Positives</span>
+                <strong id="falsePositive">—</strong>
+            </div>
+
+            <div class="accuracy-card">
+                <span>False Negatives</span>
+                <strong id="falseNegative">—</strong>
+            </div>
+
+            <div class="accuracy-card">
+                <span>True Negatives</span>
+                <strong id="trueNegative">—</strong>
+            </div>
+
+        </div>
+
+        <div class="score-grid">
+
+            <div class="score-card">
+                <span>Precision</span>
+                <strong id="precision">—</strong>
+            </div>
+
+            <div class="score-card">
+                <span>Recall</span>
+                <strong id="recall">—</strong>
+            </div>
+
+            <div class="score-card">
+                <span>F1 Score</span>
+                <strong id="f1Score">—</strong>
+            </div>
+
+        </div>
+
+    </div>
+
+
+    <!-- ===================================================== -->
+    <!-- PER-TYPE DETECTION BREAKDOWN -->
+    <!-- ===================================================== -->
+
+    <div class="section">
+
+        <h2>Detection Breakdown</h2>
+
+        <table id="detectionTable">
+
+            <thead>
+                <tr>
+                    <th>PII Type</th>
+                    <th>Expected</th>
+                    <th>Detected</th>
+                    <th>Status</th>
+                </tr>
+            </thead>
+
+            <tbody>
+
+                <tr>
+                    <td>Email</td>
+                    <td>1</td>
+                    <td id="emailDetected">—</td>
+                    <td id="emailStatus">—</td>
+                </tr>
+
+                <tr>
+                    <td>Phone</td>
+                    <td>1</td>
+                    <td id="phoneDetected">—</td>
+                    <td id="phoneStatus">—</td>
+                </tr>
+
+                <tr>
+                    <td>Aadhaar</td>
+                    <td>1</td>
+                    <td id="aadhaarDetected">—</td>
+                    <td id="aadhaarStatus">—</td>
+                </tr>
+
+                <tr>
+                    <td>PAN</td>
+                    <td>1</td>
+                    <td id="panDetected">—</td>
+                    <td id="panStatus">—</td>
+                </tr>
+
+                <tr>
+                    <td>Credit Card</td>
+                    <td>1</td>
+                    <td id="cardDetected">—</td>
+                    <td id="cardStatus">—</td>
+                </tr>
+
+                <tr>
+                    <td>Password</td>
+                    <td>1</td>
+                    <td id="passwordDetected">—</td>
+                    <td id="passwordStatus">—</td>
+                </tr>
+
+            </tbody>
+
+        </table>
+
+    </div>
+
+
     <div class="note">
         This page is used only for controlled benchmarking.
         The values are synthetic test data and must not be treated
@@ -227,6 +512,523 @@
     </div>
 
 </div>
+
+<script>
+(function () {
+    "use strict";
+
+    // ============================================================
+    // CONFIG
+    // ============================================================
+    //
+    // Uses ONLY the RUN_OCR_BENCHMARK message contract already
+    // implemented in background.js / content.js. No new message
+    // type is introduced here.
+    //
+    // This page must be loaded as part of the extension (e.g.
+    // chrome-extension://<id>/pii-accuracy-test.html) so that
+    // chrome.runtime.sendMessage() reaches background.js and
+    // passes isTrustedExtensionSender().
+    //
+    // ============================================================
+
+    const GROUND_TRUTH_TYPES = [
+        "EMAIL",
+        "PHONE",
+        "AADHAAR",
+        "PAN",
+        "CREDIT_CARD",
+        "PASSWORD"
+    ];
+
+    const TYPE_TO_ROW_PREFIX = {
+        EMAIL: "email",
+        PHONE: "phone",
+        AADHAAR: "aadhaar",
+        PAN: "pan",
+        CREDIT_CARD: "card",
+        PASSWORD: "password"
+    };
+
+    const SCROLL_SETTLE_MS = 350;
+
+
+    // ============================================================
+    // DOM HANDLES
+    // ============================================================
+
+    const runButton =
+        document.getElementById("runBenchmark");
+
+    const resetButton =
+        document.getElementById("resetBenchmark");
+
+    const status =
+        document.getElementById("benchmarkStatus");
+
+    const groundTruthSection =
+        document.querySelector(".section.ground-truth");
+
+    const negativeSection =
+        document.querySelector(".section.lookalike");
+
+
+    function setText(id, value) {
+
+        const element =
+            document.getElementById(id);
+
+        if (element) {
+            element.textContent = value;
+        }
+    }
+
+
+    function formatMs(value) {
+        return `${Number(value || 0).toFixed(2)} ms`;
+    }
+
+
+    function formatPercent(value) {
+        return `${(Number(value || 0) * 100).toFixed(2)}%`;
+    }
+
+
+    function wait(ms) {
+        return new Promise(
+            resolve => setTimeout(resolve, ms)
+        );
+    }
+
+
+    // ============================================================
+    // EXTENSION MESSAGING
+    // ============================================================
+    //
+    // window.SIHOCR is NOT reachable from this page directly —
+    // it lives inside the content-script context of the active
+    // tab. This page only talks to background.js, which relays
+    // to content.js.
+    //
+    // ============================================================
+
+    function extensionAvailable() {
+
+        return Boolean(
+            typeof chrome !== "undefined" &&
+            chrome.runtime &&
+            typeof chrome.runtime.sendMessage === "function"
+        );
+    }
+
+
+    async function runOCRBenchmarkPass(
+        testCases,
+        resetBenchmark
+    ) {
+
+        const response =
+            await chrome.runtime.sendMessage({
+
+                type:
+                    "RUN_OCR_BENCHMARK",
+
+                testCases,
+
+                resetBenchmark
+            });
+
+        if (
+            !response ||
+            typeof response !== "object"
+        ) {
+
+            throw new Error(
+                "Extension returned an invalid benchmark response."
+            );
+        }
+
+        if (response.success !== true) {
+
+            const error =
+                new Error(
+                    response.error ||
+                    "OCR benchmark failed."
+                );
+
+            error.code =
+                response.code ||
+                "OCR_BENCHMARK_FAILED";
+
+            error.retryable =
+                response.retryable === true;
+
+            throw error;
+        }
+
+        return response;
+    }
+
+
+    // ============================================================
+    // ACCURACY CALCULATION
+    // ============================================================
+    //
+    // Per-type binary classification, evaluated separately over
+    // the ground-truth region (actual positives) and the
+    // negative-sample region (actual negatives):
+    //
+    //   TP = expected type found while viewing ground truth
+    //   FN = expected type NOT found while viewing ground truth
+    //   FP = a PII type found while viewing negative samples
+    //   TN = a PII type correctly absent from negative samples
+    //
+    // ============================================================
+
+    function detectedTypeSet(detections) {
+
+        const types = new Set();
+
+        (
+            Array.isArray(detections)
+                ? detections
+                : []
+        ).forEach(
+            detection => {
+
+                const type =
+                    String(
+                        detection?.type || ""
+                    ).toUpperCase();
+
+                if (type) {
+                    types.add(type);
+                }
+            }
+        );
+
+        return types;
+    }
+
+
+    function computeAccuracy(
+        groundTruthDetections,
+        negativeDetections
+    ) {
+
+        const groundTruthTypes =
+            detectedTypeSet(groundTruthDetections);
+
+        const negativeTypes =
+            detectedTypeSet(negativeDetections);
+
+        let truePositive = 0;
+        let falseNegative = 0;
+        let falsePositive = 0;
+        let trueNegative = 0;
+
+        const perType = {};
+
+        GROUND_TRUTH_TYPES.forEach(
+            type => {
+
+                const detected =
+                    groundTruthTypes.has(type);
+
+                if (detected) {
+                    truePositive += 1;
+                } else {
+                    falseNegative += 1;
+                }
+
+                perType[type] = {
+                    detected
+                };
+
+                if (negativeTypes.has(type)) {
+                    falsePositive += 1;
+                } else {
+                    trueNegative += 1;
+                }
+            }
+        );
+
+        const precision =
+            (truePositive + falsePositive) > 0
+                ? truePositive / (truePositive + falsePositive)
+                : 0;
+
+        const recall =
+            (truePositive + falseNegative) > 0
+                ? truePositive / (truePositive + falseNegative)
+                : 0;
+
+        const f1 =
+            (precision + recall) > 0
+                ? (2 * precision * recall) / (precision + recall)
+                : 0;
+
+        return {
+            truePositive,
+            falseNegative,
+            falsePositive,
+            trueNegative,
+            precision,
+            recall,
+            f1,
+            perType
+        };
+    }
+
+
+    // ============================================================
+    // UI UPDATES
+    // ============================================================
+
+    function renderReport(report) {
+
+        if (!report) {
+            return;
+        }
+
+        setText("resultRuns", report.runs);
+
+        setText(
+            "resultAvgLatency",
+            formatMs(report.latency?.averageMs)
+        );
+
+        setText(
+            "resultMinLatency",
+            formatMs(report.latency?.minMs)
+        );
+
+        setText(
+            "resultMaxLatency",
+            formatMs(report.latency?.maxMs)
+        );
+
+        setText("resultWords", report.words?.total ?? 0);
+
+        setText(
+            "resultConfidence",
+            formatPercent(report.confidence?.average)
+        );
+
+        setText("resultAccepted", report.pii?.accepted ?? 0);
+        setText("resultRejected", report.pii?.rejected ?? 0);
+    }
+
+
+    function renderAccuracy(accuracy) {
+
+        setText("truePositive", accuracy.truePositive);
+        setText("falsePositive", accuracy.falsePositive);
+        setText("falseNegative", accuracy.falseNegative);
+        setText("trueNegative", accuracy.trueNegative);
+
+        setText("precision", formatPercent(accuracy.precision));
+        setText("recall", formatPercent(accuracy.recall));
+        setText("f1Score", formatPercent(accuracy.f1));
+
+        GROUND_TRUTH_TYPES.forEach(
+            type => {
+
+                const prefix =
+                    TYPE_TO_ROW_PREFIX[type];
+
+                const detected =
+                    accuracy.perType[type]?.detected === true;
+
+                setText(
+                    `${prefix}Detected`,
+                    detected ? 1 : 0
+                );
+
+                setText(
+                    `${prefix}Status`,
+                    detected ? "PASS" : "FAIL"
+                );
+            }
+        );
+    }
+
+
+    function resetResultFields() {
+
+        [
+            "resultRuns",
+            "resultAvgLatency",
+            "resultMinLatency",
+            "resultMaxLatency",
+            "resultWords",
+            "resultConfidence",
+            "resultAccepted",
+            "resultRejected",
+            "truePositive",
+            "falsePositive",
+            "falseNegative",
+            "trueNegative",
+            "precision",
+            "recall",
+            "f1Score"
+        ].forEach(
+            id => setText(id, "—")
+        );
+
+        GROUND_TRUTH_TYPES.forEach(
+            type => {
+
+                const prefix =
+                    TYPE_TO_ROW_PREFIX[type];
+
+                setText(`${prefix}Detected`, "—");
+                setText(`${prefix}Status`, "—");
+            }
+        );
+    }
+
+
+    // ============================================================
+    // RUN BENCHMARK
+    // ============================================================
+
+    async function runFullBenchmark() {
+
+        if (!extensionAvailable()) {
+
+            throw Object.assign(
+                new Error(
+                    "This page must be opened through the SIH " +
+                    "Privacy Agent extension, not as a plain file."
+                ),
+                { code: "EXTENSION_UNAVAILABLE" }
+            );
+        }
+
+
+        // --------------------------------------------------
+        // PASS 1 — GROUND TRUTH (actual positives)
+        // --------------------------------------------------
+
+        status.textContent =
+            "Capturing ground truth region...";
+
+        if (groundTruthSection) {
+
+            groundTruthSection.scrollIntoView({
+                block: "center"
+            });
+        }
+
+        await wait(SCROLL_SETTLE_MS);
+
+        status.textContent =
+            "Running OCR on ground truth...";
+
+        const groundTruthResponse =
+            await runOCRBenchmarkPass(
+                GROUND_TRUTH_TYPES,
+                true
+            );
+
+
+        // --------------------------------------------------
+        // PASS 2 — NEGATIVE SAMPLES (actual negatives)
+        // --------------------------------------------------
+
+        status.textContent =
+            "Capturing negative-sample region...";
+
+        if (negativeSection) {
+
+            negativeSection.scrollIntoView({
+                block: "center"
+            });
+        }
+
+        await wait(SCROLL_SETTLE_MS);
+
+        status.textContent =
+            "Running OCR on negative samples...";
+
+        const negativeResponse =
+            await runOCRBenchmarkPass(
+                GROUND_TRUTH_TYPES,
+                false
+            );
+
+
+        // --------------------------------------------------
+        // COMBINE
+        // --------------------------------------------------
+
+        const accuracy =
+            computeAccuracy(
+                groundTruthResponse.detections,
+                negativeResponse.detections
+            );
+
+        renderReport(negativeResponse.report);
+        renderAccuracy(accuracy);
+    }
+
+
+    // ============================================================
+    // EVENTS
+    // ============================================================
+
+    runButton.addEventListener(
+        "click",
+        async () => {
+
+            runButton.disabled = true;
+            resetButton.disabled = true;
+
+            try {
+
+                await runFullBenchmark();
+
+                status.textContent =
+                    "Benchmark completed";
+
+            } catch (error) {
+
+                console.error(
+                    "[PII BENCHMARK]",
+                    error?.message ||
+                    error
+                );
+
+                const code =
+                    error?.code
+                        ? ` (${error.code})`
+                        : "";
+
+                status.textContent =
+                    `Error: ${error?.message || "Benchmark failed."}${code}`;
+
+            } finally {
+
+                runButton.disabled = false;
+                resetButton.disabled = false;
+            }
+        }
+    );
+
+
+    resetButton.addEventListener(
+        "click",
+        () => {
+
+            resetResultFields();
+
+            status.textContent = "Ready";
+        }
+    );
+
+})();
+</script>
 
 </body>
 </html>

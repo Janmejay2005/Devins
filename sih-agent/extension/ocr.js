@@ -71,6 +71,151 @@
 
 
     // ========================================================
+    // PHASE 2.7 — OCR BENCHMARK SESSION
+    // ========================================================
+
+    const ocrBenchmark = {
+        enabled: true,
+
+        sessionStartedAt: null,
+        sessionRuns: 0,
+
+        totalLatencyMs: 0,
+        minLatencyMs: Infinity,
+        maxLatencyMs: 0,
+
+        totalWords: 0,
+        totalPII: 0,
+        totalAcceptedPII: 0,
+        totalRejectedPII: 0,
+
+        confidenceSamples: [],
+
+        reset() {
+            this.sessionStartedAt = performance.now();
+            this.sessionRuns = 0;
+
+            this.totalLatencyMs = 0;
+            this.minLatencyMs = Infinity;
+            this.maxLatencyMs = 0;
+
+            this.totalWords = 0;
+            this.totalPII = 0;
+            this.totalAcceptedPII = 0;
+            this.totalRejectedPII = 0;
+
+            this.confidenceSamples = [];
+        },
+
+        recordRun(result) {
+            if (!this.enabled || !result) {
+                return;
+            }
+
+            const latency = Number(result.latencyMs) || 0;
+            const wordCount = Number(result.wordCount) || 0;
+
+            const piiCount =
+                Number(result.piiDetections) || 0;
+
+            const accepted =
+                Number(result.acceptedPIIDetections) || 0;
+
+            const rejected =
+                Number(result.rejectedPIIDetections) || 0;
+
+            this.sessionRuns++;
+
+            this.totalLatencyMs += latency;
+            this.minLatencyMs =
+                Math.min(this.minLatencyMs, latency);
+            this.maxLatencyMs =
+                Math.max(this.maxLatencyMs, latency);
+
+            this.totalWords += wordCount;
+            this.totalPII += piiCount;
+            this.totalAcceptedPII += accepted;
+            this.totalRejectedPII += rejected;
+
+            if (
+                Number.isFinite(result.averageConfidence)
+            ) {
+                this.confidenceSamples.push(
+                    result.averageConfidence
+                );
+            }
+        },
+
+        getAverageLatency() {
+            if (this.sessionRuns === 0) {
+                return 0;
+            }
+
+            return (
+                this.totalLatencyMs /
+                this.sessionRuns
+            );
+        },
+
+        getAverageConfidence() {
+            if (this.confidenceSamples.length === 0) {
+                return 0;
+            }
+
+            const total =
+                this.confidenceSamples.reduce(
+                    (sum, value) => sum + value,
+                    0
+                );
+
+            return total /
+                this.confidenceSamples.length;
+        },
+
+        getReport() {
+            return {
+                runs: this.sessionRuns,
+
+                latency: {
+                    averageMs: this.getAverageLatency(),
+                    minMs:
+                        this.sessionRuns > 0
+                            ? this.minLatencyMs
+                            : 0,
+                    maxMs: this.maxLatencyMs,
+                    totalMs: this.totalLatencyMs
+                },
+
+                words: {
+                    total: this.totalWords
+                },
+
+                pii: {
+                    total: this.totalPII,
+                    accepted: this.totalAcceptedPII,
+                    rejected: this.totalRejectedPII
+                },
+
+                confidence: {
+                    average:
+                        this.getAverageConfidence(),
+                    threshold:
+                        OCR_CONFIDENCE_THRESHOLD
+                },
+
+                sessionDurationMs:
+                    this.sessionStartedAt === null
+                        ? 0
+                        : performance.now() -
+                          this.sessionStartedAt
+            };
+        }
+    };
+
+    ocrBenchmark.reset();
+
+
+    // ========================================================
     // INITIALIZE TESSERACT
     // ========================================================
 
@@ -930,6 +1075,21 @@ console.log(
 
 
         // ----------------------------------------------------
+        // PHASE 2.7 — RECORD BENCHMARK RUN
+        // ----------------------------------------------------
+
+        ocrBenchmark.recordRun({
+            latencyMs: latency,
+            wordCount: words.length,
+            piiDetections: ocrPIIResult.detections.length,
+            acceptedPIIDetections: runAccepted,
+            rejectedPIIDetections: runRejected,
+            averageConfidence:
+                ocrMetrics.lastAverageConfidence
+        });
+
+
+        // ----------------------------------------------------
         // RETURN LOCAL RESULT
         // ----------------------------------------------------
 
@@ -1159,7 +1319,22 @@ console.log(
             setConfidenceThreshold,
 
         getConfidenceThreshold:
-            getConfidenceThreshold
+            getConfidenceThreshold,
+
+        // Phase 2.7
+        getBenchmarkReport:
+            function () {
+
+                return ocrBenchmark.getReport();
+
+            },
+
+        resetBenchmark:
+            function () {
+
+                ocrBenchmark.reset();
+
+            }
 
     };
 
