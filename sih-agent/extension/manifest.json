@@ -38,6 +38,10 @@
     "js": [
     "tesseract.min.js",
     "ocr.js",
+    "tensorflow.min.js",
+    "runtime-check.js",
+    "blazeface.min.js",
+    "face.js",
     "perception.js",
     "fusion.js",
     "content.js"

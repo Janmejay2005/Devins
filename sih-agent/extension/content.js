@@ -103,6 +103,11 @@ const PII_PATTERNS = {
 // Covers anti-aliasing / sub-pixel scaling at the region edges.
 const REDACTION_PADDING = 3;
 
+const FACE_CONFIDENCE_THRESHOLD = 0.60;
+
+const FACE_DETECTION_TIMEOUT_MS = 10000;
+const SCREENSHOT_PIPELINE_TIMEOUT_MS = 30000;
+
 function createEmptyBenchmarkMetrics() {
     return {
         piiDetectionLatencyMs: 0,
@@ -135,7 +140,29 @@ function createEmptyBenchmarkMetrics() {
         detectionCount: 0,
 
 // ========================================================
-// PHASE 2.5 — ADVANCED REDACTION METRICS
+// PHASE 3 â€” FACE DETECTION METRICS
+// ========================================================
+
+faceDetectionLatencyMs: 0,
+faceDetectionCount: 0,
+faceDetectionFailed: false,
+faceDetectionAvailable: false,
+
+faceDetectionsBeforeFilter: 0,
+faceDetectionsRejected: 0,
+faceAverageConfidence: 0,
+
+fusionLatencyMs: 0,
+fusionInputRegions: 0,
+fusionOutputRegions: 0,
+
+domDetectionCount: 0,
+ocrDetectionCount: 0,
+
+screenshotPipelineLatencyMs: 0,
+
+// ========================================================
+// PHASE 2.5 â€” ADVANCED REDACTION METRICS
 // ========================================================
 
 unifiedPIIRegions: 0,
@@ -159,6 +186,190 @@ let benchmarkMetrics = createEmptyBenchmarkMetrics();
 
 function resetBenchmarkMetrics() {
     benchmarkMetrics = createEmptyBenchmarkMetrics();
+}
+
+function isValidDetectionRect(rect) {
+    if (!rect) {
+        return false;
+    }
+
+    const values = [
+        rect.left,
+        rect.top,
+        rect.right,
+        rect.bottom,
+        rect.width,
+        rect.height
+    ].map(Number);
+
+    if (!values.every(Number.isFinite)) {
+        return false;
+    }
+
+    if (
+        rect.width <= 0 ||
+        rect.height <= 0
+    ) {
+        return false;
+    }
+
+    if (
+        rect.right <= rect.left ||
+        rect.bottom <= rect.top
+    ) {
+        return false;
+    }
+
+    return true;
+}
+
+
+function normalizeFaceDetections(faceResult) {
+
+    const source =
+        Array.isArray(faceResult)
+            ? faceResult
+            : Array.isArray(faceResult?.detections)
+                ? faceResult.detections
+                : [];
+
+    return source
+        .map(function (detection) {
+
+            if (!detection || !detection.rect) {
+                return null;
+            }
+
+            const rawRect = detection.rect;
+
+            /*
+             * face.js returns:
+             *
+             * {
+             *     x,
+             *     y,
+             *     width,
+             *     height
+             * }
+             *
+             * Convert it to the content.js rectangle format:
+             *
+             * {
+             *     left,
+             *     top,
+             *     right,
+             *     bottom,
+             *     width,
+             *     height
+             * }
+             */
+
+            const left = Number.isFinite(Number(rawRect.left))
+                ? Number(rawRect.left)
+                : Number(rawRect.x);
+
+            const top = Number.isFinite(Number(rawRect.top))
+                ? Number(rawRect.top)
+                : Number(rawRect.y);
+
+            const width = Number(rawRect.width);
+            const height = Number(rawRect.height);
+
+            if (
+                !Number.isFinite(left) ||
+                !Number.isFinite(top) ||
+                !Number.isFinite(width) ||
+                !Number.isFinite(height) ||
+                width <= 0 ||
+                height <= 0
+            ) {
+                return null;
+            }
+
+            const right =
+                Number.isFinite(Number(rawRect.right))
+                    ? Number(rawRect.right)
+                    : left + width;
+
+            const bottom =
+                Number.isFinite(Number(rawRect.bottom))
+                    ? Number(rawRect.bottom)
+                    : top + height;
+
+            const rect = {
+                left,
+                top,
+                right,
+                bottom,
+                width,
+                height
+            };
+
+            if (!isValidDetectionRect(rect)) {
+                return null;
+            }
+
+            const confidence =
+                Number(detection.confidence);
+
+            if (
+                !Number.isFinite(confidence) ||
+                confidence < FACE_CONFIDENCE_THRESHOLD ||
+                confidence > 1
+            ) {
+                return null;
+            }
+
+            return {
+                type: "FACE",
+
+                source: "vision",
+
+                confidence,
+
+                rect
+            };
+        })
+        .filter(Boolean);
+}
+
+
+function logPrivacyPipelineSummary() {
+
+    console.log(
+        "[PRIVACY] Pipeline summary:",
+        {
+            dom:
+                benchmarkMetrics.domDetectionCount || 0,
+
+            ocr:
+                benchmarkMetrics.ocrDetectionCount || 0,
+
+            face:
+                benchmarkMetrics.faceDetectionCount || 0,
+
+            faceConfidence:
+                benchmarkMetrics.faceAverageConfidence || 0,
+
+            faceRejected:
+                benchmarkMetrics.faceDetectionsRejected || 0,
+
+            faceLatency:
+                benchmarkMetrics.faceDetectionLatencyMs || 0,
+
+            fused:
+                benchmarkMetrics.fusionOutputRegions || 0,
+
+            redacted:
+                benchmarkMetrics.redactedRegions || 0,
+
+            verified:
+                benchmarkMetrics.verificationPassed === true,
+
+            privacyGate:
+                benchmarkMetrics.privacyGatePassed === true
+        }
+    );
 }
 
 function getDataUrlByteSize(dataUrl) {
@@ -325,6 +536,8 @@ let privacyEngineRunning = false;
 
 let captureInProgress = false;
 
+let captureGeneration = 0;
+
 // Separate from captureInProgress: an OCR benchmark run must
 // never contaminate or block the production capture pipeline,
 // and vice versa.
@@ -358,10 +571,10 @@ function isValidPANCandidate(value) {
     /*
      * PAN structure:
      *
-     * Characters 1–3: alphabetic
+     * Characters 1â€“3: alphabetic
      * Character 4: holder category
      * Character 5: surname/name initial
-     * Characters 6–9: numeric
+     * Characters 6â€“9: numeric
      * Character 10: alphabetic
      *
      * Common holder categories:
@@ -1367,7 +1580,7 @@ function resetDetections() {
     detections = [];
 }
 // ============================================================
-// STAGE 2 — DOM PERCEPTION ADAPTER
+// STAGE 2 â€” DOM PERCEPTION ADAPTER
 // ============================================================
 //
 // The existing DOM PII engine remains unchanged.
@@ -1445,10 +1658,6 @@ if (
         "[PERCEPTION] Perception manager not loaded."
     );
 }
-
-// ============================================================
-// SERIALIZABLE DETECTIONS
-// ============================================================
 
 // ============================================================
 // SERIALIZABLE DETECTIONS
@@ -2458,7 +2667,228 @@ function countUnredactedRegions(
 
 
 // ============================================================
+// FACE -> IMAGE REGION RESOLUTION
+// ============================================================
+// Face detections are pixel regions from the screenshot.
+// For privacy, a detected face should redact the image element
+// containing that face, not the entire screenshot.
+// ============================================================
+
+function getImageRegionForFace(
+    faceRect,
+    viewportWidth,
+    viewportHeight
+) {
+
+    if (
+        !faceRect ||
+        !isValidDetectionRect(faceRect)
+    ) {
+        return null;
+    }
+
+    const faceCenterX =
+        (faceRect.left + faceRect.right) / 2;
+
+    const faceCenterY =
+        (faceRect.top + faceRect.bottom) / 2;
+
+    const faceWidth =
+        Math.max(1, faceRect.right - faceRect.left);
+
+    const faceHeight =
+        Math.max(1, faceRect.bottom - faceRect.top);
+
+    const faceArea =
+        faceWidth * faceHeight;
+
+    let bestImage = null;
+    let bestScore = 0;
+
+    const images =
+        Array.from(
+            document.images || []
+        );
+
+    for (const imageElement of images) {
+
+        if (!imageElement) {
+            continue;
+        }
+
+        const rect =
+            imageElement.getBoundingClientRect();
+
+        if (
+            !Number.isFinite(rect.left) ||
+            !Number.isFinite(rect.top) ||
+            !Number.isFinite(rect.right) ||
+            !Number.isFinite(rect.bottom) ||
+            rect.width <= 0 ||
+            rect.height <= 0
+        ) {
+            continue;
+        }
+
+        // Ignore images that are not visible in the current viewport.
+        if (
+            rect.right <= 0 ||
+            rect.bottom <= 0 ||
+            rect.left >= viewportWidth ||
+            rect.top >= viewportHeight
+        ) {
+            continue;
+        }
+
+        const intersectionLeft =
+            Math.max(
+                faceRect.left,
+                rect.left
+            );
+
+        const intersectionTop =
+            Math.max(
+                faceRect.top,
+                rect.top
+            );
+
+        const intersectionRight =
+            Math.min(
+                faceRect.right,
+                rect.right
+            );
+
+        const intersectionBottom =
+            Math.min(
+                faceRect.bottom,
+                rect.bottom
+            );
+
+        const intersectionWidth =
+            Math.max(
+                0,
+                intersectionRight - intersectionLeft
+            );
+
+        const intersectionHeight =
+            Math.max(
+                0,
+                intersectionBottom - intersectionTop
+            );
+
+        const intersectionArea =
+            intersectionWidth * intersectionHeight;
+
+        const centerInside =
+            faceCenterX >= rect.left &&
+            faceCenterX <= rect.right &&
+            faceCenterY >= rect.top &&
+            faceCenterY <= rect.bottom;
+
+        if (
+            intersectionArea <= 0 &&
+            !centerInside
+        ) {
+            continue;
+        }
+
+        // Prefer an image that contains the face center and covers
+        // the largest portion of the detected face.
+        const overlapScore =
+            intersectionArea / faceArea;
+
+        const score =
+            (centerInside ? 2 : 0) +
+            overlapScore;
+
+        if (score > bestScore) {
+            bestScore = score;
+            bestImage = rect;
+        }
+    }
+
+    if (!bestImage) {
+        return null;
+    }
+
+    return {
+        left: bestImage.left,
+        top: bestImage.top,
+        right: bestImage.right,
+        bottom: bestImage.bottom,
+        width: bestImage.width,
+        height: bestImage.height
+    };
+}
+
+
+function getFaceImageRegions(
+    detectionList,
+    viewportWidth,
+    viewportHeight
+) {
+
+    const regions = [];
+    const seen = new Set();
+
+    const detections =
+        Array.isArray(detectionList)
+            ? detectionList
+            : [];
+
+    for (const detection of detections) {
+
+        if (
+            !detection ||
+            detection.type !== "FACE" ||
+            !detection.rect
+        ) {
+            continue;
+        }
+
+        const imageRect =
+            getImageRegionForFace(
+                detection.rect,
+                viewportWidth,
+                viewportHeight
+            );
+
+        /*
+         * IMPORTANT:
+         *
+         * A face must belong to an actual image.
+         *
+         * Do NOT fall back to the face rectangle.
+         * Otherwise false-positive BlazeFace detections
+         * outside images create black boxes in the page.
+         */
+
+        if (!imageRect) {
+            continue;
+        }
+
+        const key = [
+            Math.round(imageRect.left * 10),
+            Math.round(imageRect.top * 10),
+            Math.round(imageRect.right * 10),
+            Math.round(imageRect.bottom * 10)
+        ].join(":");
+
+        if (seen.has(key)) {
+            continue;
+        }
+
+        seen.add(key);
+
+        regions.push(imageRect);
+    }
+
+    return regions;
+}
+
+// ============================================================
 // SCREENSHOT SANITIZATION
+// PHASE 2.5 â€” ADVANCED REDACTION + VERIFICATION
 // ============================================================
 //
 // Screenshot coordinates are viewport-relative.
@@ -2469,27 +2899,21 @@ function countUnredactedRegions(
 //
 // Only detections belonging to the captured viewport are useful.
 // Off-screen detections are naturally clipped by the canvas.
-// ============================================================
-
-// ============================================================
-// SCREENSHOT SANITIZATION
-// PHASE 2.5 — ADVANCED REDACTION + VERIFICATION
-// ============================================================
 //
 // Privacy pipeline:
 //
 //   Unified PII
-//        ↓
+//        â†“
 //   Region classification
-//        ↓
+//        â†“
 //   Viewport clipping
-//        ↓
+//        â†“
 //   Screenshot redaction
-//        ↓
+//        â†“
 //   Pixel verification
-//        ↓
+//        â†“
 //   Privacy Gate
-//        ↓
+//        â†“
 //   Encode sanitized image
 //
 // IMPORTANT:
@@ -2663,6 +3087,60 @@ function sanitizeScreenshot(
                             let invalidCount = 0;
 
 
+                            // A face is redacted at the image-element level.
+                            // This keeps the rest of the screenshot visible.
+                            const faceImageRects =
+                                getFaceImageRegions(
+                                    detectionList,
+                                    viewportWidth,
+                                    viewportHeight
+                                );
+
+
+                            faceImageRects.forEach(
+                                rect => {
+
+                                    const regions =
+                                        toCanvasRegions(
+                                            rect,
+                                            viewportWidth,
+                                            viewportHeight,
+                                            scaleX,
+                                            scaleY,
+                                            canvas.width,
+                                            canvas.height,
+                                            REDACTION_PADDING
+                                        );
+
+                                    if (regions.invalid) {
+                                        invalidCount++;
+                                        return;
+                                    }
+
+                                    if (regions.outside) {
+                                        outOfViewCount++;
+                                        return;
+                                    }
+
+                                    if (
+                                        !regions.core ||
+                                        !regions.paint
+                                    ) {
+                                        invalidCount++;
+                                        return;
+                                    }
+
+                                    paintRegions.push(
+                                        regions.paint
+                                    );
+
+                                    coreRegions.push(
+                                        regions.core
+                                    );
+                                }
+                            );
+
+
                             (
                                 Array.isArray(
                                     detectionList
@@ -2676,6 +3154,16 @@ function sanitizeScreenshot(
 
                                         invalidCount++;
 
+                                        return;
+                                    }
+
+
+                                    // FACE detections are already represented by
+                                    // their containing image region above. Do not
+                                    // also paint the small face rectangle.
+                                    if (
+                                        detection.type === "FACE"
+                                    ) {
                                         return;
                                     }
 
@@ -5050,7 +5538,7 @@ function executeType(
     // ========================================================
 
     console.log(
-        "🔐 Local editable field:",
+        "ðŸ” Local editable field:",
         {
             tag:
                 input.tagName,
@@ -5153,10 +5641,6 @@ function executeType(
 // After this action succeeds, popup.js performs another
 // capture + local sanitization + AI planning cycle.
 //
-// ============================================================
-
-// ============================================================
-// EXECUTE SCROLL
 // ============================================================
 
 function executeScroll(
@@ -5275,14 +5759,6 @@ function executeWait(
             validation.milliseconds
     };
 }
-
-// ============================================================
-// EXECUTE BROWSER ACTION
-// ============================================================
-
-// ============================================================
-// EXECUTE BROWSER ACTION
-// ============================================================
 
 // ============================================================
 // EXECUTE BROWSER ACTION
@@ -5923,7 +6399,7 @@ chrome.runtime.onMessage.addListener(
 
 
             console.log(
-                "📐 Capture prepared with",
+                "ðŸ“ Capture prepared with",
                 currentDetections.length,
                 "PII regions"
             );
@@ -5976,20 +6452,21 @@ chrome.runtime.onMessage.addListener(
         // ====================================================
         // SANITIZE SCREENSHOT
         // ====================================================
-
+        //
+        // PHASE 3:
+        // OCR and Face Detection run independently and in
+        // parallel. Both must succeed before fusion/redaction
+        // runs; either failing blocks transmission.
+        //
+        //     OCR â”€â”€â”€â”€â”€â”€â”
+        //               â”œâ”€â”€â†’ FUSION â†’ REDACTION
+        //     FACE â”€â”€â”€â”€â”€â”˜
+        //
+        // IMPORTANT:
+        // OCR text and raw face imagery NEVER leave the content
+        // script. The backend receives only the already-
+        // sanitized image.
         // ====================================================
-// SANITIZE SCREENSHOT
-// ====================================================
-//
-// PHASE 2.2:
-// Raw screenshot is processed locally by OCR BEFORE
-// screenshot redaction.
-//
-// IMPORTANT:
-// OCR result NEVER leaves the content script.
-//
-// The backend receives only the already-sanitized image.
-// ====================================================
 
 if (
     message.type ===
@@ -6009,342 +6486,639 @@ if (
         return true;
     }
 
+    resetBenchmarkMetrics();
+
     captureInProgress = true;
 
+    if (
+        typeof message.screenshot !== "string" ||
+        !message.screenshot.startsWith(
+            "data:image/"
+        )
+    ) {
+
+        captureInProgress = false;
+
+        sendResponse({
+            success: false,
+            error:
+                "Privacy pipeline blocked: invalid screenshot."
+        });
+
+        return true;
+    }
+
+    captureGeneration += 1;
+
+    const currentCaptureGeneration =
+        captureGeneration;
+
+    const screenshotPipelineStart =
+        performance.now();
+
 
     // ====================================================
-    // PHASE 2.2 — LOCAL OCR
+    // EARLY FAIL-CLOSED GUARD â€” OCR MODULE
+    // ====================================================
+    //
+    // If OCR is unavailable, block immediately instead of
+    // starting Face Detection and then discarding it.
+    // There is no unsanitized-screenshot fallback.
     // ====================================================
 
-    const runOCR =
-        window.SIHOCR &&
-        typeof window.SIHOCR.testScreenshot ===
-            "function";
+    if (
+        !window.SIHOCR ||
+        typeof window.SIHOCR.testScreenshot !== "function"
+    ) {
 
-
-    if (runOCR) {
-
-        console.log(
-            "[OCR] Running local OCR on captured screenshot..."
+        console.error(
+            "[PRIVACY] OCR module unavailable."
         );
 
-
-        window.SIHOCR.testScreenshot(
-            message.screenshot
-        )
-            .then(function (ocrResult) {
-
-                // ----------------------------------------
-                // IMPORTANT PRIVACY RULE
-                // ----------------------------------------
-                //
-                // OCR text remains inside this content
-                // script.
-                //
-                // Do NOT place ocrResult.text inside
-                // sendResponse().
-                //
-                // Do NOT send it through chrome.runtime.
-                // ----------------------------------------
-
-                console.log(
-    "[OCR] Local screenshot OCR completed:",
-    `${ocrResult.latencyMs.toFixed(2)} ms`,
-    `| words=${ocrResult.words.length}`
-);
-
-                console.log(
-                    "[OCR] Bounding boxes available:",
-                    ocrResult.words.length
-                );
-
-
-                // ----------------------------------------
-                // Continue normal privacy sanitization.
-                // ----------------------------------------
-
-                // ----------------------------------------
-// PHASE 2.4 — MULTI-SOURCE PII FUSION
-// ----------------------------------------
-//
-// DOM detections and OCR detections are
-// independently generated.
-//
-// DOM detections:
-//     message.detections
-//
-// OCR detections:
-//     ocrResult.detections
-//
-// Fusion combines overlapping detections,
-// removes duplicates and preserves
-// OCR-only detections.
-//
-// IMPORTANT:
-// Actual PII values never enter this layer.
-// Only:
-//     type
-//     source
-//     confidence
-//     rect
-//
-// are used.
-// ----------------------------------------
-
-const domDetections = (message.detections || []).map(function (detection) {
-    return {
-        ...detection,
-        source: "dom"
-    };
-});
-
-const ocrDetections = (ocrResult.detections || []).map(function (detection) {
-    return {
-        ...detection,
-        source: "ocr"
-    };
-});
-
-console.log(
-    "[FUSION] Input detections:",
-    `DOM=${domDetections.length}`,
-    `OCR=${ocrDetections.length}`
-);
-
-
-// ----------------------------------------
-// RUN FUSION
-// ----------------------------------------
-
-let fusedDetections =
-    domDetections;
-
-if (
-    window.SIHPiiFusion &&
-    typeof window.SIHPiiFusion.fuse ===
-        "function"
-) {
-
-    const fusionInput = [
-        ...domDetections,
-        ...ocrDetections
-    ];
-
-    const fusionResult = window.SIHPiiFusion.fuse([
-    ...domDetections,
-    ...ocrDetections
-]);
-
-    fusedDetections =
-        Array.isArray(
-            fusionResult?.detections
-        )
-            ? fusionResult.detections
-            : domDetections;
-
-
-    console.log(
-        "[FUSION] Unified PII set:",
-        `input=${fusionResult?.stats?.input ?? fusionInput.length}`,
-        `output=${fusionResult?.stats?.output ?? fusedDetections.length}`,
-        `merged=${fusionResult?.stats?.merged ?? 0}`,
-        `DOM=${fusionResult?.stats?.dom ?? domDetections.length}`,
-        `OCR=${fusionResult?.stats?.ocr ?? ocrDetections.length}`,
-        `latency=${Number(
-            fusionResult?.latencyMs || 0
-        ).toFixed(2)} ms`
-    );
-
-} else {
-
-    console.warn(
-        "[FUSION] Fusion module unavailable. " +
-        "Using DOM detections only."
-    );
-}
-
-
-// ----------------------------------------
-// SAFETY CHECK
-// ----------------------------------------
-//
-// Every detection reaching the redaction
-// engine must have valid geometry.
-//
-// If fusion somehow returns an invalid
-// detection, fail closed instead of
-// silently allowing it through.
-// ----------------------------------------
-
-const invalidFusedDetection =
-    fusedDetections.some(
-        detection =>
-            !detection ||
-            !detection.rect ||
-            !Number.isFinite(
-                Number(
-                    detection.rect.left
-                )
-            ) ||
-            !Number.isFinite(
-                Number(
-                    detection.rect.top
-                )
-            ) ||
-            !Number.isFinite(
-                Number(
-                    detection.rect.right
-                )
-            ) ||
-            !Number.isFinite(
-                Number(
-                    detection.rect.bottom
-                )
-            )
-    );
-
-
-if (invalidFusedDetection) {
-
-    throw new Error(
-        "PII fusion produced an invalid " +
-        "detection geometry."
-    );
-}
-
-
-console.log(
-    "📐 Sanitizing screenshot with",
-    fusedDetections.length,
-    "unified PII regions"
-);
-
-
-// ----------------------------------------
-// LOCAL REDACTION
-// ----------------------------------------
-
-return sanitizeScreenshot(
-
-    message.screenshot,
-
-    fusedDetections
-
-);            
-            })
-            
-
-.then(function (sanitizedImage) {
-
-    runPrivacyEngine();
-
-
-    captureInProgress =
-        false;
-
-
-    sendResponse({
-
-        success: true,
-
-        sanitizedImage,
-
-        dom_elements:
-            collectSafeDOM(),
-
-        viewport: {
-
-            width:
-                window.innerWidth,
-
-            height:
-                window.innerHeight,
-
-            devicePixelRatio:
-                window.devicePixelRatio,
-
-            scrollX:
-                window.scrollX,
-
-            scrollY:
-                window.scrollY,
-
-            documentWidth:
-                document.documentElement
-                    ? document.documentElement.scrollWidth
-                    : window.innerWidth,
-
-            documentHeight:
-                document.documentElement
-                    ? document.documentElement.scrollHeight
-                    : window.innerHeight
-
-        }
-
-    });
-
-})
-            .catch(function (error) {
-
-                console.error(
-                    "[OCR] Local OCR / sanitization failed:",
-                    error?.message ||
-                    error
-                );
-
-
-                captureInProgress =
-                    false;
-
-
-                runPrivacyEngine();
-
-
-                sendResponse({
-
-                    success: false,
-
-                    error:
-                        error?.message ||
-                        "OCR or screenshot sanitization failed."
-
-                });
-
-            });
-
+        captureInProgress = false;
+
+        sendResponse({
+            success: false,
+            error:
+                "Privacy pipeline blocked: OCR module unavailable."
+        });
 
         return true;
     }
 
 
     // ====================================================
-    // FALLBACK
+    // PHASE 2.2 â€” LOCAL OCR (independent stage)
+    // ====================================================
+
+    async function runOCRStage() {
+
+        const runOCR =
+            window.SIHOCR &&
+            typeof window.SIHOCR.testScreenshot ===
+                "function";
+
+        if (!runOCR) {
+
+            console.error(
+                "[PRIVACY] OCR module unavailable."
+            );
+
+            throw new Error(
+                "Privacy pipeline blocked: OCR module unavailable."
+            );
+        }
+
+        console.log(
+            "[OCR] Running local OCR on captured screenshot..."
+        );
+
+        const ocrResult =
+            await window.SIHOCR.testScreenshot(
+                message.screenshot
+            );
+
+        // ----------------------------------------
+        // IMPORTANT PRIVACY RULE
+        // ----------------------------------------
+        //
+        // OCR text remains inside this content
+        // script.
+        //
+        // Do NOT place ocrResult.text inside
+        // sendResponse().
+        //
+        // Do NOT send it through chrome.runtime.
+        // ----------------------------------------
+
+        console.log(
+            "[OCR] Local screenshot OCR completed:",
+            `${ocrResult.latencyMs.toFixed(2)} ms`,
+            `| words=${ocrResult.words.length}`
+        );
+
+        console.log(
+            "[OCR] Bounding boxes available:",
+            ocrResult.words.length
+        );
+
+        return ocrResult;
+    }
+
+
+    // ====================================================
+    // PHASE 3 â€” LOCAL FACE DETECTION (independent stage)
     // ====================================================
     //
-    // If OCR is unavailable, preserve the existing
-    // Stage 1 screenshot pipeline.
+    // The raw screenshot remains inside content.js.
+    // No image/frame is sent to the backend.
+    // Only sanitized face metadata is retained.
     // ====================================================
 
-    console.warn(
-        "[OCR] OCR module unavailable. Using normal sanitization."
-    );
+    async function runFaceStage() {
+
+        const faceStart =
+            performance.now();
+
+        benchmarkMetrics.faceDetectionFailed =
+            false;
+
+        benchmarkMetrics.faceDetectionAvailable =
+            Boolean(
+                window.SIHFace &&
+                typeof window.SIHFace.detect === "function"
+            );
+
+        if (
+            !benchmarkMetrics.faceDetectionAvailable
+        ) {
+
+            benchmarkMetrics.faceDetectionFailed =
+                true;
+
+            console.error(
+                "[FACE] Face detector unavailable."
+            );
+
+            throw new Error(
+                "Privacy pipeline blocked: face detector unavailable."
+            );
+        }
+
+        try {
+
+            console.log(
+                "[FACE] Running local face detection..."
+            );
+
+            const faceTimeout =
+                new Promise(
+                    function (_, reject) {
+
+                        setTimeout(
+                            function () {
+
+                                reject(
+                                    new Error(
+                                        "Face detection timed out."
+                                    )
+                                );
+
+                            },
+                            FACE_DETECTION_TIMEOUT_MS
+                        );
+                    }
+                );
+
+            const faceResult =
+                await Promise.race([
+                    window.SIHFace.detect({
+                        screenshot:
+                            message.screenshot
+                    }),
+                    faceTimeout
+                ]);
+
+            const rawFaceDetections =
+                Array.isArray(faceResult)
+                    ? faceResult
+                    : Array.isArray(
+                        faceResult?.detections
+                    )
+                        ? faceResult.detections
+                        : [];
+
+            benchmarkMetrics.faceDetectionsBeforeFilter =
+                rawFaceDetections.length;
+
+            const faceDetections =
+                normalizeFaceDetections(
+                    faceResult
+                );
+
+            benchmarkMetrics.faceDetectionsRejected =
+                Math.max(
+                    0,
+                    rawFaceDetections.length -
+                    faceDetections.length
+                );
+
+            benchmarkMetrics.faceDetectionCount =
+                faceDetections.length;
+
+            if (
+                faceDetections.length > 0
+            ) {
+
+                const confidenceSum =
+                    faceDetections.reduce(
+                        function (sum, detection) {
+
+                            return (
+                                sum +
+                                Number(
+                                    detection.confidence
+                                )
+                            );
+                        },
+                        0
+                    );
+
+                benchmarkMetrics.faceAverageConfidence =
+                    confidenceSum /
+                    faceDetections.length;
+            }
+
+            benchmarkMetrics.faceDetectionLatencyMs =
+                performance.now() -
+                faceStart;
+
+            console.log(
+                "[FACE] Completed:",
+                `faces=${faceDetections.length}`,
+                `latency=${benchmarkMetrics.faceDetectionLatencyMs.toFixed(2)} ms`
+            );
+
+            if (
+                faceDetections.length === 0
+            ) {
+
+                console.log(
+                    "[FACE] No faces detected."
+                );
+            }
+
+            return faceDetections;
+
+        } catch (error) {
+
+            benchmarkMetrics.faceDetectionFailed =
+                true;
+
+            benchmarkMetrics.faceDetectionLatencyMs =
+                performance.now() -
+                faceStart;
+
+            console.error(
+                "[FACE] Detection failed:",
+                error?.message ||
+                error
+            );
+
+            /*
+             * Fail closed.
+             *
+             * A face detector failure must not silently
+             * become a successful privacy result.
+             */
+
+            throw new Error(
+                "Privacy pipeline blocked: face detection failed."
+            );
+        }
+    }
 
 
-    sanitizeScreenshot(
+    // ====================================================
+    // FUSION + REDACTION (runs once OCR and FACE both settle)
+    // ====================================================
 
-        message.screenshot,
+    async function runPrivacyPipeline() {
 
-        message.detections || []
+        const [
+            ocrSettled,
+            faceSettled
+        ] = await Promise.allSettled([
+            runOCRStage(),
+            runFaceStage()
+        ]);
 
-    )
+        if (
+            ocrSettled.status === "rejected"
+        ) {
+
+            throw ocrSettled.reason;
+        }
+
+        if (
+            faceSettled.status === "rejected"
+        ) {
+
+            throw faceSettled.reason;
+        }
+
+        const ocrResult =
+            ocrSettled.value;
+
+        const faceDetections =
+            faceSettled.value;
+
+        // ----------------------------------------
+        // PHASE 2.4 â€” MULTI-SOURCE PII FUSION
+        // ----------------------------------------
+        //
+        // DOM detections and OCR detections are
+        // independently generated.
+        //
+        // DOM detections:
+        //     message.detections
+        //
+        // OCR detections:
+        //     ocrResult.detections
+        //
+        // Fusion combines overlapping detections,
+        // removes duplicates and preserves
+        // OCR-only detections.
+        //
+        // IMPORTANT:
+        // Actual PII values never enter this layer.
+        // Only:
+        //     type
+        //     source
+        //     confidence
+        //     rect
+        //
+        // are used.
+        // ----------------------------------------
+
+        const domDetections = (message.detections || []).map(function (detection) {
+            return {
+                ...detection,
+                source: "dom"
+            };
+        });
+
+        const ocrDetections = (ocrResult.detections || []).map(function (detection) {
+            return {
+                ...detection,
+                source: "ocr"
+            };
+        });
+
+        benchmarkMetrics.domDetectionCount =
+            domDetections.length;
+
+        benchmarkMetrics.ocrDetectionCount =
+            ocrDetections.length;
+
+        const visionDetections =
+            (faceDetections || []).map(
+                function (detection) {
+
+                    return {
+
+                        ...detection,
+
+                        type: "FACE",
+
+                        source: "vision"
+
+                    };
+
+                }
+            );
+
+        console.log(
+            "[FUSION] Input detections:",
+            `DOM=${domDetections.length}`,
+            `OCR=${ocrDetections.length}`,
+            `FACE=${visionDetections.length}`
+        );
+
+
+        // ----------------------------------------
+        // FACE CONFIDENCE VALIDATION
+        // ----------------------------------------
+        //
+        // normalizeFaceDetections() already filters by
+        // FACE_CONFIDENCE_THRESHOLD; this is a final
+        // defense-in-depth safety check.
+        // ----------------------------------------
+
+        const invalidFaceDetection =
+            faceDetections.some(
+                function (detection) {
+
+                    const confidence =
+                        Number(
+                            detection.confidence
+                        );
+
+                    return (
+                        !Number.isFinite(
+                            confidence
+                        ) ||
+                        confidence <
+                            FACE_CONFIDENCE_THRESHOLD ||
+                        confidence > 1
+                    );
+                }
+            );
+
+        if (
+            invalidFaceDetection
+        ) {
+
+            throw new Error(
+                "Privacy pipeline blocked: invalid face confidence."
+            );
+        }
+
+
+        // ----------------------------------------
+        // RUN FUSION
+        // ----------------------------------------
+
+        let fusedDetections = [
+            ...domDetections,
+            ...ocrDetections,
+            ...visionDetections
+        ];
+
+        const fusionStart =
+            performance.now();
+
+        benchmarkMetrics.fusionInputRegions =
+            fusedDetections.length;
+
+        if (
+            window.SIHPiiFusion &&
+            typeof window.SIHPiiFusion.fuse ===
+                "function"
+        ) {
+
+            const fusionInput = [
+                ...domDetections,
+                ...ocrDetections,
+                ...visionDetections
+            ];
+
+            const fusionResult =
+                window.SIHPiiFusion.fuse([
+                    ...domDetections,
+                    ...ocrDetections,
+                    ...visionDetections
+                ]);
+
+            fusedDetections =
+                Array.isArray(
+                    fusionResult?.detections
+                )
+                    ? fusionResult.detections
+                    : fusedDetections;
+
+            benchmarkMetrics.fusionLatencyMs =
+                performance.now() -
+                fusionStart;
+
+            benchmarkMetrics.fusionOutputRegions =
+                fusedDetections.length;
+
+
+            console.log(
+                "[FUSION] Unified PII set:",
+                `input=${fusionResult?.stats?.input ?? fusionInput.length}`,
+                `output=${fusionResult?.stats?.output ?? fusedDetections.length}`,
+                `merged=${fusionResult?.stats?.merged ?? 0}`,
+                `DOM=${fusionResult?.stats?.dom ?? domDetections.length}`,
+                `OCR=${fusionResult?.stats?.ocr ?? ocrDetections.length}`,
+                `latency=${Number(
+                    fusionResult?.latencyMs || 0
+                ).toFixed(2)} ms`
+            );
+
+        } else {
+
+            console.error(
+                "[FUSION] Fusion module unavailable."
+            );
+
+            throw new Error(
+                "Privacy pipeline blocked: fusion module unavailable."
+            );
+        }
+
+
+        // ----------------------------------------
+        // SAFETY CHECK
+        // ----------------------------------------
+        //
+        // Every detection reaching the redaction
+        // engine must have valid geometry.
+        //
+        // If fusion somehow returns an invalid
+        // detection, fail closed instead of
+        // silently allowing it through.
+        // ----------------------------------------
+
+        const invalidFusedDetection =
+            fusedDetections.some(
+                detection =>
+                    !detection ||
+                    !isValidDetectionRect(
+                        detection.rect
+                    )
+            );
+
+
+        if (
+            invalidFusedDetection
+        ) {
+
+            throw new Error(
+                "Privacy pipeline blocked: invalid fused detection geometry."
+            );
+        }
+
+
+        console.log(
+            "ðŸ“ Sanitizing screenshot with",
+            fusedDetections.length,
+            "unified PII regions"
+        );
+
+
+        // ----------------------------------------
+        // LOCAL REDACTION
+        // ----------------------------------------
+
+        const sanitizedImage =
+            await sanitizeScreenshot(
+
+                message.screenshot,
+
+                fusedDetections
+
+            );
+
+        console.log(
+            "[FACE] Redaction pipeline:",
+            `detected=${faceDetections.length}`,
+            `verified=${benchmarkMetrics.verificationPassed === true}`
+        );
+
+
+        // ----------------------------------------
+        // STALE-CAPTURE PROTECTION
+        // ----------------------------------------
+        //
+        // Now that OCR and FACE run independently,
+        // an old asynchronous result must never be
+        // allowed to satisfy a newer capture request.
+        // ----------------------------------------
+
+        if (
+            currentCaptureGeneration !==
+            captureGeneration
+        ) {
+
+            throw new Error(
+                "Privacy pipeline blocked: stale capture result."
+            );
+        }
+
+        return sanitizedImage;
+    }
+
+
+    // ====================================================
+    // COMPLETE PIPELINE TIMEOUT
+    // ====================================================
+    //
+    // Prevents: captureInProgress = true â†’ something hangs â†’
+    // capture never finishes.
+    // ====================================================
+
+    const pipelineTimeout =
+        new Promise(
+            function (_, reject) {
+
+                setTimeout(
+                    function () {
+
+                        reject(
+                            new Error(
+                                "Privacy screenshot pipeline timed out."
+                            )
+                        );
+
+                    },
+                    SCREENSHOT_PIPELINE_TIMEOUT_MS
+                );
+            }
+        );
+
+    Promise.race([
+        runPrivacyPipeline(),
+        pipelineTimeout
+    ])
         .then(function (sanitizedImage) {
 
-            runPrivacyEngine();
+            benchmarkMetrics.screenshotPipelineLatencyMs =
+                performance.now() -
+                screenshotPipelineStart;
 
-
-            captureInProgress =
-                false;
-
+            logPrivacyPipelineSummary();
 
             sendResponse({
 
@@ -6389,12 +7163,11 @@ return sanitizeScreenshot(
         })
         .catch(function (error) {
 
-            captureInProgress =
-                false;
-
-
-            runPrivacyEngine();
-
+            console.error(
+                "[PRIVACY] Screenshot sanitization pipeline failed:",
+                error?.message ||
+                error
+            );
 
             sendResponse({
 
@@ -6402,9 +7175,17 @@ return sanitizeScreenshot(
 
                 error:
                     error?.message ||
-                    "Screenshot sanitization failed."
+                    "Privacy screenshot sanitization failed."
 
             });
+
+        })
+        .finally(function () {
+
+            captureInProgress =
+                false;
+
+            runPrivacyEngine();
 
         });
 

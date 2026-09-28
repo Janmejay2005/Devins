@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>SIH Phase 3.3 — Face Detection Test</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;font-family:Arial,Helvetica,sans-serif;background:#f3f5f7;color:#17202a}
+header{background:#17202a;color:#fff;padding:28px 40px;border-bottom:5px solid #4caf50}
+header h1{margin:0 0 8px;font-size:30px} header p{margin:0;color:#d9dee2}
+.wrap{max-width:1250px;margin:28px auto;padding:0 24px 50px}
+.card{background:#fff;border:1px solid #d8dee4;border-radius:14px;padding:22px;margin-bottom:22px}
+.tests{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
+.test{border:1px solid #d8dee4;border-radius:12px;overflow:hidden;background:#fafbfc}
+.head{padding:15px 16px;background:#eef1f4;border-bottom:1px solid #d8dee4}
+.head h2{margin:0 0 5px;font-size:19px}.head p{margin:0;color:#68737d;font-size:13px}
+.photo{height:370px;background:#dfe4e8;padding:10px;display:flex;align-items:center;justify-content:center;overflow:hidden}
+.photo img{display:block;width:100%;height:100%;object-fit:cover;border-radius:7px;background:#ddd}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.two img{min-width:0}
+.note{margin-top:18px;padding:15px;border-left:4px solid #4caf50;background:#f1f8f2;border-radius:5px;line-height:1.5}
+pre{margin:0;background:#182027;color:#e8edf0;border-radius:8px;padding:16px;overflow:auto}
+footer{text-align:center;color:#78838d;font-size:13px;padding:10px}
+@media(max-width:900px){.tests{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+
+<header>
+<h1>SIH Privacy Browser Agent — Phase 3.3</h1>
+<p>Real human-face detection, confidence and bounding-box validation</p>
+</header>
+
+<div class="wrap">
+
+<section class="card">
+<h2>Phase 3.3 — Real Face Test</h2>
+<p>These are direct Wikimedia Commons image files. Start with Test 1 and use the existing Capture / Sanitize Screenshot action.</p>
+
+<div class="tests">
+
+<div class="test">
+<div class="head">
+<h2>TEST 1 — Single Face</h2>
+<p>Expected: 1 face</p>
+</div>
+<div class="photo">
+<img src="https://upload.wikimedia.org/wikipedia/commons/8/89/Mary_Lynn_Reed_in_2023.jpg"
+     alt="Real human portrait">
+</div>
+</div>
+
+<div class="test">
+<div class="head">
+<h2>TEST 2 — Two Faces</h2>
+<p>Expected: 2 faces</p>
+</div>
+<div class="photo two">
+<img src="https://upload.wikimedia.org/wikipedia/commons/2/27/%28Unidentified_man_and_woman%2C_seated%2C_facing_front%29_%28LOC%29_%284484595780%29.jpg"
+     alt="Man and woman facing camera">
+</div>
+</div>
+
+<div class="test">
+<div class="head">
+<h2>TEST 3 — Multiple Faces</h2>
+<p>Expected: many faces</p>
+</div>
+<div class="photo">
+<img src="https://upload.wikimedia.org/wikipedia/commons/d/dd/Wikimania_2012_Group_Photograph-0004.jpg"
+     alt="Large group of people">
+</div>
+</div>
+
+</div>
+
+<div class="note">
+<strong>Important:</strong> The images are direct files hosted by Wikimedia Commons, not page redirects or guessed image URLs. If an image still appears broken, the problem is network access to that image host rather than the HTML image path.
+</div>
+</section>
+
+<section class="card">
+<h2>Expected Console</h2>
+<pre>[FACE] Screenshot loaded: ...
+[FACE] TensorFlow.js: 4.22.0
+[FACE] TensorFlow backend: webgl
+[FACE] Inference: ... ms | faces=1
+[FACE] Local face detection completed: faces=1</pre>
+</section>
+
+<section class="card">
+<h2>Phase 3.3 Success Condition</h2>
+<div class="note">
+<strong>PASS:</strong> BlazeFace detects a real face from the captured screenshot and returns a valid confidence and bounding box. After that, we proceed to Phase 3.4 and verify that the detected face is actually masked.
+</div>
+</section>
+
+<footer>SIH Privacy Browser Agent • Phase 3.3 Face Detection Test</footer>
+</div>
+</body>
+</html>

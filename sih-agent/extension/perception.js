@@ -370,13 +370,38 @@
     });
 
     registerDetector("face", {
-        enabled: false,
-        source: "vision",
-        version: "0.0.0",
-        detect: function () {
+    enabled: false,
+    source: "vision",
+    version: window.SIHFace?.version || "3.1.0",
+
+    detect: async function (context = {}) {
+
+        if (
+            !window.SIHFace ||
+            typeof window.SIHFace.detect !== "function"
+        ) {
+            console.warn(
+                "[PERCEPTION] SIHFace is not available."
+            );
+
             return [];
         }
-    });
+
+        try {
+
+            return await window.SIHFace.detect(context);
+
+        } catch (error) {
+
+            console.error(
+                "[PERCEPTION] Face detector failed:",
+                error?.message || error
+            );
+
+            return [];
+        }
+    }
+});
 
 
     // ========================================================
