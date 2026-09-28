@@ -1,967 +1,469 @@
-/* ============================================================
- * SIH PRIVACY BROWSER AGENT
- * Face Detection Module
- *
- * Version: 3.7.3
- *
- * Main fixes:
- *   1. Robust screenshot input adapter
- *   2. Supports nested screenshot payloads
- *   3. Supports data URLs / blob URLs / Blob
- *   4. Supports Image / ImageBitmap / Canvas / Video
- *   5. Keeps landmark rejection disabled
- *   6. Keeps geometry validation
- *   7. Keeps 512 / 384 / 256 detection passes
- *   8. Keeps duplicate suppression
- *
- * ============================================================ */
+// ============================================================
+// SIH PRIVACY BROWSER AGENT
+// face.js
+// Phase 3 — Local Face Detection
+// ============================================================
 
-(() => {
+(function () {
+
     "use strict";
 
-    const FACE_VERSION = "3.7.3";
+    const FACE_VERSION = "3.8.0";
 
-    /* ============================================================
-     * CONFIG
-     * ============================================================ */
-
-    const FACE_CONFIDENCE_THRESHOLD = 0.50;
+    const FACE_CONFIDENCE_THRESHOLD = 0.70;
 
     const MAX_INFERENCE_DIMENSION = 1280;
 
-    const STANDARD_TILE_SIZE = 512;
-    const SMALL_TILE_SIZE = 384;
-    const TINY_TILE_SIZE = 256;
+    const STANDARD_TILE = 512;
+    const SMALL_TILE = 384;
+    const TINY_TILE = 256;
 
-    const TILE_OVERLAP = 0.25;
+    const TILE_OVERLAP = 0.20;
 
     const MIN_FACE_SIZE = 8;
-    const MIN_VALID_FACE_SIZE = 20;
 
-    const MIN_FACE_ASPECT_RATIO = 0.55;
-    const MAX_FACE_ASPECT_RATIO = 1.65;
+    const MERGE_IOU_THRESHOLD = 0.35;
 
-    const MAX_SCREEN_FACE_RATIO = 0.75;
-
-    const MERGE_IOU_THRESHOLD = 0.30;
-    const DUPLICATE_CENTER_DISTANCE_FACTOR = 0.65;
-    const DUPLICATE_SIZE_RATIO = 1.80;
-
-    /* ============================================================
-     * METRICS
-     * ============================================================ */
-
-    const metrics = {
-        version: FACE_VERSION,
-
-        inferenceTime: 0,
-
-        rawDetections: 0,
-
-        standardRaw: 0,
-        standardValidated: 0,
-
-        smallRaw: 0,
-        smallValidated: 0,
-
-        tinyRaw: 0,
-        tinyValidated: 0,
-
-        geometryRejected: 0,
-
-        landmarkRejected: 0,
-
-        duplicateMerged: 0,
-
-        finalFaces: 0
-    };
-
-    /* ============================================================
-     * MODEL
-     * ============================================================ */
-
+    const MAX_TILES_PER_PASS = 48;
     let model = null;
+
     let initialized = false;
 
-    /* ============================================================
-     * DEPENDENCIES
-     * ============================================================ */
+    let initializing = null;
 
-    async function ensureDependencies() {
-        if (initialized && model) {
-            return model;
-        }
+    let activeModelURL = "";
 
-        if (typeof tf === "undefined") {
+    const metrics = {
+
+        modelLoadLatencyMs: 0,
+
+        modelSource: "none",
+
+        detectionRuns: 0,
+
+        inferenceRuns: 0,
+
+        totalDetectionLatencyMs: 0,
+
+        totalInferenceLatencyMs: 0,
+
+        detectedFaces: 0,
+
+        rawPredictions: 0,
+
+        acceptedPredictions: 0,
+
+        rejectedPredictions: 0,
+
+        invalidPredictions: 0,
+
+        errors: 0,
+
+        confidenceSamples: [],
+
+        lastRawPredictionCount: 0,
+
+        lastAcceptedFaceCount: 0,
+
+        lastInferenceLatencyMs: 0,
+
+        lastSourceWidth: 0,
+
+        lastSourceHeight: 0,
+
+        lastInferenceWidth: 0,
+
+        lastInferenceHeight: 0
+    };
+
+
+    // ========================================================
+    // DEPENDENCIES
+    // ========================================================
+
+    function checkDependencies() {
+
+        if (!window.tf) {
+
             throw new Error(
-                "[FACE] TensorFlow.js is not available."
+                "TensorFlow.js is not available."
             );
+
         }
 
-        console.log(
-            `[FACE] TensorFlow.js detected | version=${tf.version?.tfjs || "unknown"}`
-        );
+        if (!window.blazeface) {
+
+            throw new Error(
+                "BlazeFace library is not available."
+            );
+
+        }
+
+    }
+
+
+    // ========================================================
+    // EXTENSION URL
+    // ========================================================
+
+    function getExtensionURL(path) {
 
         try {
-            if (tf.getBackend() !== "webgl") {
-                try {
-                    await tf.setBackend("webgl");
-                    await tf.ready();
-                } catch (error) {
-                    console.warn(
-                        "[FACE] WebGL unavailable, using current backend.",
-                        error
-                    );
-                }
+
+            if (
+                typeof chrome !== "undefined" &&
+                chrome.runtime &&
+                typeof chrome.runtime.getURL === "function"
+            ) {
+
+                return chrome.runtime.getURL(path);
+
             }
 
-            await tf.ready();
+        } catch (_) {}
+
+        try {
+
+            if (
+                typeof browser !== "undefined" &&
+                browser.runtime &&
+                typeof browser.runtime.getURL === "function"
+            ) {
+
+                return browser.runtime.getURL(path);
+
+            }
+
+        } catch (_) {}
+
+        return path;
+    }
+
+
+    // ========================================================
+    // LOCAL MODEL PATHS
+    // ========================================================
+
+    function getLocalModelURLs() {
+
+        return LOCAL_MODEL_PATHS.map(
+            getExtensionURL
+        );
+
+    }
+
+
+    // ========================================================
+    // MODEL INITIALIZATION
+    // ========================================================
+
+    async function initialize() {
+
+    if (
+        initialized &&
+        model
+    ) {
+        return true;
+    }
+
+    if (initializing) {
+        return initializing;
+    }
+
+    initializing = (async function () {
+
+        const start =
+            performance.now();
+
+        try {
+
+            checkDependencies();
 
             console.log(
-                `[FACE] TensorFlow backend=${tf.getBackend()}`
+                "[FACE] TensorFlow.js:",
+                window.tf.version?.tfjs ||
+                "unknown"
             );
+
+            await window.tf.ready();
+
+            console.log(
+                "[FACE] TensorFlow backend:",
+                window.tf.getBackend()
+            );
+
+            console.log(
+                "[FACE] Loading BlazeFace model..."
+            );
+
+            model =
+                await window.blazeface.load({
+                    maxFaces:
+                        20,
+
+                    inputWidth:
+                        128,
+
+                    inputHeight:
+                        128,
+
+                    iouThreshold:
+                        0.30,
+
+                    scoreThreshold:
+                        0.75
+                });
+
+            if (!model) {
+                throw new Error(
+                    "BlazeFace model returned no model."
+                );
+            }
+
+            initialized =
+                true;
+
+            activeModelURL =
+                "tfhub-default";
+
+            metrics.modelSource =
+                "remote";
+
+            metrics.modelLoadLatencyMs =
+                performance.now() -
+                start;
+
+            console.log(
+                "[FACE] BlazeFace initialized:",
+                `${metrics.modelLoadLatencyMs.toFixed(2)} ms`
+            );
+
+            return true;
+
         } catch (error) {
-            console.warn(
-                "[FACE] TensorFlow initialization warning:",
+
+            initialized =
+                false;
+
+            model =
+                null;
+
+            activeModelURL =
+                "";
+
+            metrics.modelSource =
+                "none";
+
+            metrics.errors++;
+
+            console.error(
+                "[FACE] Initialization failed:",
+                error?.message ||
                 error
             );
-        }
 
-        if (typeof blazeface === "undefined") {
-            throw new Error(
-                "[FACE] BlazeFace library is not available."
-            );
-        }
+            return false;
 
-        console.log(
-            "[FACE] BlazeFace API available."
-        );
-
-        model = await blazeface.load({
-            maxFaces: 50,
-            inputWidth: 128,
-            inputHeight: 128
-        });
-
-        initialized = true;
-
-        console.log(
-            `[FACE] BlazeFace initialized | version=${FACE_VERSION}`
-        );
-
-        return model;
-    }
-
-    /* ============================================================
-     * INPUT TYPE HELPERS
-     * ============================================================ */
-
-    function isString(value) {
-        return typeof value === "string";
-    }
-
-    function isDataUrl(value) {
-        return (
-            isString(value) &&
-            /^data:image\//i.test(value)
-        );
-    }
-
-    function isBlobUrl(value) {
-        return (
-            isString(value) &&
-            /^blob:/i.test(value)
-        );
-    }
-
-    function isHttpImageUrl(value) {
-        return (
-            isString(value) &&
-            /^(https?:|chrome-extension:|moz-extension:|file:)/i.test(value)
-        );
-    }
-
-    function isCanvasLike(value) {
-        return (
-            value &&
-            typeof value.getContext === "function" &&
-            Number(value.width) > 0 &&
-            Number(value.height) > 0
-        );
-    }
-
-    function isImageBitmapLike(value) {
-        return (
-            typeof ImageBitmap !== "undefined" &&
-            value instanceof ImageBitmap
-        );
-    }
-
-    function isHTMLImage(value) {
-        return (
-            typeof HTMLImageElement !== "undefined" &&
-            value instanceof HTMLImageElement
-        );
-    }
-
-    function isHTMLVideo(value) {
-        return (
-            typeof HTMLVideoElement !== "undefined" &&
-            value instanceof HTMLVideoElement
-        );
-    }
-
-    function isBlob(value) {
-        return (
-            typeof Blob !== "undefined" &&
-            value instanceof Blob
-        );
-    }
-
-    function isArrayBuffer(value) {
-        return (
-            typeof ArrayBuffer !== "undefined" &&
-            value instanceof ArrayBuffer
-        );
-    }
-
-    /* ============================================================
-     * OBJECT DEBUG
-     * ============================================================ */
-
-    function describeInput(value) {
-        if (value === null) {
-            return "null";
-        }
-
-        if (value === undefined) {
-            return "undefined";
-        }
-
-        if (typeof value === "string") {
-            return `string(length=${value.length}, prefix=${value.slice(0, 40)})`;
-        }
-
-        if (typeof value !== "object") {
-            return typeof value;
-        }
-
-        const details = [];
-
-        try {
-            details.push(
-                `constructor=${value.constructor?.name || "unknown"}`
-            );
-        } catch (_) {}
-
-        try {
-            details.push(
-                `keys=${Object.keys(value).slice(0, 30).join(",")}`
-            );
-        } catch (_) {}
-
-        try {
-            if (value.width !== undefined) {
-                details.push(
-                    `width=${value.width}`
-                );
-            }
-
-            if (value.height !== undefined) {
-                details.push(
-                    `height=${value.height}`
-                );
-            }
-        } catch (_) {}
-
-        return details.join(" | ");
-    }
-
-    /* ============================================================
-     * URL → IMAGE
-     * ============================================================ */
-
-    async function loadImageFromUrl(url) {
-        return new Promise((resolve, reject) => {
-            const image = new Image();
-
-            image.onload = () => {
-                resolve(image);
-            };
-
-            image.onerror = () => {
-                reject(
-                    new Error(
-                        "[FACE] Failed to load screenshot URL."
-                    )
-                );
-            };
-
-            image.src = url;
-        });
-    }
-
-    /* ============================================================
-     * BLOB → IMAGE
-     * ============================================================ */
-
-    async function loadImageFromBlob(blob) {
-        if (
-            typeof createImageBitmap === "function"
-        ) {
-            try {
-                const bitmap =
-                    await createImageBitmap(blob);
-
-                return bitmap;
-            } catch (error) {
-                console.warn(
-                    "[FACE] createImageBitmap failed.",
-                    error
-                );
-            }
-        }
-
-        const objectUrl =
-            URL.createObjectURL(blob);
-
-        try {
-            return await loadImageFromUrl(
-                objectUrl
-            );
         } finally {
-            URL.revokeObjectURL(
-                objectUrl
-            );
+
+            initializing =
+                null;
         }
-    }
 
-    /* ============================================================
-     * ARRAYBUFFER → BLOB
-     * ============================================================ */
+    })();
 
-    async function loadImageFromArrayBuffer(
-        buffer
+    return initializing;
+}
+
+    // ========================================================
+    // IMAGE LOADING
+    // ========================================================
+
+    function loadImageFromDataURL(
+        dataURL
     ) {
-        try {
-            const blob =
-                new Blob(
-                    [buffer],
-                    {
-                        type: "image/png"
-                    }
-                );
 
-            return await loadImageFromBlob(
-                blob
-            );
-        } catch (error) {
-            throw new Error(
-                "[FACE] Could not convert ArrayBuffer to image."
-            );
-        }
-    }
-
-    /* ============================================================
-     * COMMON PROPERTY NAMES
-     * ============================================================ */
-
-    const IMAGE_KEYS = [
-        "screenshot",
-        "screenshotData",
-        "screenshot_data",
-        "screenshotDataUrl",
-        "screenshot_data_url",
-        "dataUrl",
-        "dataURL",
-        "data",
-        "image",
-        "imageData",
-        "imageDataUrl",
-        "image_data",
-        "image_data_url",
-        "src",
-        "source",
-        "url",
-        "blob",
-        "bitmap",
-        "canvas",
-        "capture",
-        "captureData",
-        "capture_data",
-        "result",
-        "payload"
-    ];
-
-    /* ============================================================
-     * DIRECT VALUE RESOLUTION
-     * ============================================================ */
-
-    async function resolveDirectInput(
-        value
-    ) {
-        if (!value) {
-            return null;
-        }
-
-        /* --------------------------------------------------------
-         * STRING
-         * -------------------------------------------------------- */
-
-        if (isString(value)) {
-            const trimmed =
-                value.trim();
-
-            if (!trimmed) {
-                return null;
-            }
-
-            /*
-             * Data URL.
-             */
-            if (isDataUrl(trimmed)) {
-                console.log(
-                    "[FACE] Resolved input: data-url"
-                );
-
-                return await loadImageFromUrl(
-                    trimmed
-                );
-            }
-
-            /*
-             * Blob URL.
-             */
-            if (isBlobUrl(trimmed)) {
-                console.log(
-                    "[FACE] Resolved input: blob-url"
-                );
-
-                return await loadImageFromUrl(
-                    trimmed
-                );
-            }
-
-            /*
-             * Other URL-like screenshot.
-             */
-            if (isHttpImageUrl(trimmed)) {
-                console.log(
-                    "[FACE] Resolved input: URL"
-                );
-
-                return await loadImageFromUrl(
-                    trimmed
-                );
-            }
-
-            /*
-             * Sometimes screenshot strings are
-             * raw base64 without the data: prefix.
-             */
-            if (
-                trimmed.length > 100 &&
-                /^[A-Za-z0-9+/=\s]+$/.test(
-                    trimmed
-                )
+        return new Promise(
+            function (
+                resolve,
+                reject
             ) {
-                try {
-                    const dataUrl =
-                        "data:image/png;base64," +
-                        trimmed.replace(
-                            /\s/g,
-                            ""
+
+                if (
+                    typeof dataURL !== "string" ||
+                    !dataURL.startsWith(
+                        "data:image/"
+                    )
+                ) {
+
+                    reject(
+                        new Error(
+                            "Invalid screenshot data URL."
+                        )
+                    );
+
+                    return;
+                }
+
+
+                const image =
+                    new Image();
+
+
+                image.onload =
+                    function () {
+
+                        resolve(
+                            image
                         );
 
-                    console.log(
-                        "[FACE] Resolved input: raw-base64"
-                    );
+                    };
 
-                    return await loadImageFromUrl(
-                        dataUrl
-                    );
-                } catch (_) {
-                    return null;
-                }
+
+                image.onerror =
+                    function () {
+
+                        reject(
+                            new Error(
+                                "Screenshot image could not be loaded."
+                            )
+                        );
+
+                    };
+
+
+                image.src =
+                    dataURL;
+
             }
+        );
+    }
+
+
+    // ========================================================
+    // INPUT RESOLUTION
+    // ========================================================
+
+    async function resolveSource(
+        context
+    ) {
+
+        if (!context) {
 
             return null;
         }
 
-        /* --------------------------------------------------------
-         * BLOB
-         * -------------------------------------------------------- */
 
-        if (isBlob(value)) {
-            console.log(
-                `[FACE] Resolved input: Blob | type=${value.type || "unknown"} | size=${value.size}`
-            );
+        if (
+            typeof HTMLImageElement !==
+                "undefined" &&
+            context instanceof
+                HTMLImageElement
+        ) {
 
-            return await loadImageFromBlob(
-                value
-            );
+            return context;
         }
 
-        /* --------------------------------------------------------
-         * ARRAYBUFFER
-         * -------------------------------------------------------- */
 
-        if (isArrayBuffer(value)) {
-            console.log(
-                "[FACE] Resolved input: ArrayBuffer"
-            );
+        if (
+            typeof HTMLCanvasElement !==
+                "undefined" &&
+            context instanceof
+                HTMLCanvasElement
+        ) {
 
-            return await loadImageFromArrayBuffer(
-                value
-            );
+            return context;
         }
 
-        /* --------------------------------------------------------
-         * IMAGE
-         * -------------------------------------------------------- */
 
-        if (isHTMLImage(value)) {
-            console.log(
-                "[FACE] Resolved input: HTMLImageElement"
-            );
+        if (
+            typeof ImageBitmap !==
+                "undefined" &&
+            context instanceof
+                ImageBitmap
+        ) {
+
+            return context;
+        }
+
+
+        if (
+            context.image
+        ) {
+
+            return context.image;
+        }
+
+
+        if (
+            context.canvas
+        ) {
+
+            return context.canvas;
+        }
+
+
+        if (
+            context.screenshotCanvas
+        ) {
+
+            return context.screenshotCanvas;
+        }
+
+
+        const candidates = [
+
+            context.screenshot,
+
+            context.screenshotDataUrl,
+
+            context.screenshot_data_url,
+
+            context.dataURL,
+
+            context.dataUrl
+
+        ];
+
+
+        for (
+            const value of candidates
+        ) {
 
             if (
-                !value.complete ||
-                value.naturalWidth === 0
+                typeof value === "string" &&
+                value.startsWith(
+                    "data:image/"
+                )
             ) {
-                await new Promise(
-                    (resolve, reject) => {
-                        value.onload =
-                            resolve;
 
-                        value.onerror =
-                            reject;
-                    }
+                return loadImageFromDataURL(
+                    value
                 );
+
             }
 
-            return value;
         }
 
-        /* --------------------------------------------------------
-         * IMAGE BITMAP
-         * -------------------------------------------------------- */
-
-        if (isImageBitmapLike(value)) {
-            console.log(
-                `[FACE] Resolved input: ImageBitmap | ${value.width}x${value.height}`
-            );
-
-            return value;
-        }
-
-        /* --------------------------------------------------------
-         * CANVAS
-         * -------------------------------------------------------- */
-
-        if (isCanvasLike(value)) {
-            console.log(
-                `[FACE] Resolved input: Canvas | ${value.width}x${value.height}`
-            );
-
-            return value;
-        }
-
-        /* --------------------------------------------------------
-         * VIDEO
-         * -------------------------------------------------------- */
-
-        if (isHTMLVideo(value)) {
-            console.log(
-                `[FACE] Resolved input: Video | ${value.videoWidth}x${value.videoHeight}`
-            );
-
-            return value;
-        }
 
         return null;
     }
 
-    /* ============================================================
-     * RECURSIVE OBJECT RESOLUTION
-     * ============================================================ */
 
-    async function resolveScreenshotInput(
-        source,
-        visited = new Set(),
-        depth = 0
-    ) {
-        if (
-            source === null ||
-            source === undefined
-        ) {
-            return null;
-        }
-
-        /*
-         * Prevent infinite recursive objects.
-         */
-        if (depth > 6) {
-            return null;
-        }
-
-        /*
-         * Direct supported type.
-         */
-        const direct =
-            await resolveDirectInput(
-                source
-            );
-
-        if (direct) {
-            return direct;
-        }
-
-        /*
-         * Primitive that is not an image.
-         */
-        if (
-            typeof source !== "object"
-        ) {
-            return null;
-        }
-
-        /*
-         * Prevent cycles.
-         */
-        if (visited.has(source)) {
-            return null;
-        }
-
-        visited.add(source);
-
-        /* --------------------------------------------------------
-         * FIRST: known screenshot keys
-         * -------------------------------------------------------- */
-
-        for (
-            const key of IMAGE_KEYS
-        ) {
-            let value;
-
-            try {
-                value =
-                    source[key];
-            } catch (_) {
-                continue;
-            }
-
-            if (
-                value === undefined ||
-                value === null ||
-                value === source
-            ) {
-                continue;
-            }
-
-            const resolved =
-                await resolveScreenshotInput(
-                    value,
-                    visited,
-                    depth + 1
-                );
-
-            if (resolved) {
-                console.log(
-                    `[FACE] Resolved nested screenshot property: ${key}`
-                );
-
-                return resolved;
-            }
-        }
-
-        /* --------------------------------------------------------
-         * SECOND: inspect object values
-         * -------------------------------------------------------- */
-
-        let keys = [];
-
-        try {
-            keys =
-                Object.keys(source);
-        } catch (_) {
-            keys = [];
-        }
-
-        for (
-            const key of keys
-        ) {
-            if (
-                IMAGE_KEYS.includes(key)
-            ) {
-                continue;
-            }
-
-            let value;
-
-            try {
-                value =
-                    source[key];
-            } catch (_) {
-                continue;
-            }
-
-            if (
-                value === undefined ||
-                value === null ||
-                value === source
-            ) {
-                continue;
-            }
-
-            /*
-             * Only recursively inspect likely
-             * image-related properties.
-             */
-            const keyLooksRelevant =
-                /image|screen|capture|screenshot|data|source|canvas|bitmap|blob|url|src/i.test(
-                    key
-                );
-
-            if (!keyLooksRelevant) {
-                continue;
-            }
-
-            const resolved =
-                await resolveScreenshotInput(
-                    value,
-                    visited,
-                    depth + 1
-                );
-
-            if (resolved) {
-                console.log(
-                    `[FACE] Resolved inferred screenshot property: ${key}`
-                );
-
-                return resolved;
-            }
-        }
-
-        return null;
-    }
-
-    /* ============================================================
-     * NORMALIZE INPUT
-     * ============================================================ */
-
-    async function normalizeImageSource(
-        source
-    ) {
-        const resolved =
-            await resolveScreenshotInput(
-                source
-            );
-
-        if (resolved) {
-            return resolved;
-        }
-
-        console.error(
-            "[FACE] Unable to resolve screenshot input."
-        );
-
-        console.error(
-            "[FACE] Input description:",
-            describeInput(source)
-        );
-
-        /*
-         * Extra debugging for object payloads.
-         */
-        if (
-            source &&
-            typeof source === "object"
-        ) {
-            try {
-                console.error(
-                    "[FACE] Input keys:",
-                    Object.keys(source)
-                );
-            } catch (_) {}
-        }
-
-        throw new Error(
-            "[FACE] Unsupported screenshot input type."
-        );
-    }
-
-    /* ============================================================
-     * IMAGE DIMENSIONS
-     * ============================================================ */
-
-    function getImageDimensions(
-        image
-    ) {
-        if (!image) {
-            throw new Error(
-                "[FACE] Invalid image source."
-            );
-        }
-
-        let width = 0;
-        let height = 0;
-
-        if (isHTMLImage(image)) {
-            width =
-                Number(
-                    image.naturalWidth
-                ) ||
-                Number(
-                    image.width
-                ) ||
-                0;
-
-            height =
-                Number(
-                    image.naturalHeight
-                ) ||
-                Number(
-                    image.height
-                ) ||
-                0;
-        }
-
-        if (
-            !width &&
-            isImageBitmapLike(image)
-        ) {
-            width =
-                Number(
-                    image.width
-                ) || 0;
-
-            height =
-                Number(
-                    image.height
-                ) || 0;
-        }
-
-        if (
-            !width &&
-            isCanvasLike(image)
-        ) {
-            width =
-                Number(
-                    image.width
-                ) || 0;
-
-            height =
-                Number(
-                    image.height
-                ) || 0;
-        }
-
-        if (
-            !width &&
-            isHTMLVideo(image)
-        ) {
-            width =
-                Number(
-                    image.videoWidth
-                ) ||
-                Number(
-                    image.width
-                ) ||
-                0;
-
-            height =
-                Number(
-                    image.videoHeight
-                ) ||
-                Number(
-                    image.height
-                ) ||
-                0;
-        }
-
-        if (!width) {
-            width =
-                Number(
-                    image.naturalWidth
-                ) ||
-                Number(
-                    image.videoWidth
-                ) ||
-                Number(
-                    image.width
-                ) ||
-                0;
-
-            height =
-                Number(
-                    image.naturalHeight
-                ) ||
-                Number(
-                    image.videoHeight
-                ) ||
-                Number(
-                    image.height
-                ) ||
-                0;
-        }
-
-        if (
-            !Number.isFinite(width) ||
-            !Number.isFinite(height) ||
-            width <= 0 ||
-            height <= 0
-        ) {
-            throw new Error(
-                "[FACE] Could not determine image dimensions."
-            );
-        }
-
-        return {
-            width,
-            height
-        };
-    }
-
-    /* ============================================================
-     * INFERENCE SCALE
-     * ============================================================ */
-
-    function calculateInferenceScale(
-        width,
-        height
-    ) {
-        const largestDimension =
-            Math.max(
-                width,
-                height
-            );
-
-        if (
-            largestDimension <=
-            MAX_INFERENCE_DIMENSION
-        ) {
-            return 1;
-        }
-
-        return (
-            MAX_INFERENCE_DIMENSION /
-            largestDimension
-        );
-    }
-
-    /* ============================================================
-     * CANVAS
-     * ============================================================ */
+    // ========================================================
+    // CANVAS
+    // ========================================================
 
     function createCanvas(
         width,
         height
     ) {
+
         const canvas =
             document.createElement(
                 "canvas"
             );
+
 
         canvas.width =
             Math.max(
@@ -969,565 +471,466 @@
                 Math.round(width)
             );
 
+
         canvas.height =
             Math.max(
                 1,
                 Math.round(height)
             );
 
-        return canvas;
-    }
 
-    function drawImageToCanvas(
-        image,
-        canvas,
-        sourceX = 0,
-        sourceY = 0,
-        sourceWidth = null,
-        sourceHeight = null
-    ) {
         const ctx =
             canvas.getContext(
-                "2d",
-                {
-                    willReadFrequently:
-                        true
-                }
+                "2d"
             );
+
 
         if (!ctx) {
-            throw new Error(
-                "[FACE] Could not create canvas context."
-            );
-        }
 
-        const dimensions =
-            getImageDimensions(
-                image
-            );
-
-        sourceWidth =
-            sourceWidth ||
-            dimensions.width;
-
-        sourceHeight =
-            sourceHeight ||
-            dimensions.height;
-
-        ctx.clearRect(
-            0,
-            0,
-            canvas.width,
-            canvas.height
-        );
-
-        ctx.drawImage(
-            image,
-
-            sourceX,
-            sourceY,
-            sourceWidth,
-            sourceHeight,
-
-            0,
-            0,
-            canvas.width,
-            canvas.height
-        );
-
-        return canvas;
-    }
-
-    /* ============================================================
-     * RECT
-     * ============================================================ */
-
-    function normalizeRect(
-        box
-    ) {
-        if (!box) {
             return null;
         }
 
-        let x;
-        let y;
-        let width;
-        let height;
 
-        if (
-            Array.isArray(box)
-        ) {
-            x =
-                Number(
-                    box[0]
-                );
+        ctx.imageSmoothingEnabled =
+            true;
 
-            y =
-                Number(
-                    box[1]
-                );
+        ctx.imageSmoothingQuality =
+            "high";
 
-            width =
-                Number(
-                    box[2]
-                );
-
-            height =
-                Number(
-                    box[3]
-                );
-        } else {
-            x =
-                Number(
-                    box.x ??
-                    box.left ??
-                    0
-                );
-
-            y =
-                Number(
-                    box.y ??
-                    box.top ??
-                    0
-                );
-
-            if (
-                box.width !==
-                    undefined &&
-                box.height !==
-                    undefined
-            ) {
-                width =
-                    Number(
-                        box.width
-                    );
-
-                height =
-                    Number(
-                        box.height
-                    );
-            } else {
-                const right =
-                    Number(
-                        box.right ??
-                        x
-                    );
-
-                const bottom =
-                    Number(
-                        box.bottom ??
-                        y
-                    );
-
-                width =
-                    right - x;
-
-                height =
-                    bottom - y;
-            }
-        }
-
-        if (
-            !Number.isFinite(x) ||
-            !Number.isFinite(y) ||
-            !Number.isFinite(width) ||
-            !Number.isFinite(height)
-        ) {
-            return null;
-        }
-
-        if (width < 0) {
-            x += width;
-            width =
-                Math.abs(width);
-        }
-
-        if (height < 0) {
-            y += height;
-            height =
-                Math.abs(height);
-        }
 
         return {
-            x,
-            y,
-            width,
-            height
+            canvas,
+            ctx
         };
     }
 
-    /* ============================================================
-     * CONFIDENCE
-     * ============================================================ */
+
+    // ========================================================
+    // SOURCE -> INFERENCE CANVAS
+    // ========================================================
+
+    function createInferenceCanvas(
+        source,
+        sourceWidth,
+        sourceHeight
+    ) {
+
+        const scale =
+            Math.min(
+                1,
+                MAX_INFERENCE_DIMENSION /
+                Math.max(
+                    sourceWidth,
+                    sourceHeight
+                )
+            );
+
+
+        const width =
+            Math.max(
+                1,
+                Math.round(
+                    sourceWidth *
+                    scale
+                )
+            );
+
+
+        const height =
+            Math.max(
+                1,
+                Math.round(
+                    sourceHeight *
+                    scale
+                )
+            );
+
+
+        const result =
+            createCanvas(
+                width,
+                height
+            );
+
+
+        if (!result) {
+
+            return null;
+        }
+
+
+        result.ctx.drawImage(
+            source,
+            0,
+            0,
+            sourceWidth,
+            sourceHeight,
+            0,
+            0,
+            width,
+            height
+        );
+
+
+        return {
+
+            canvas:
+                result.canvas,
+
+            width,
+
+            height,
+
+            scale
+
+        };
+    }
+
+
+    // ========================================================
+    // CONFIDENCE
+    // ========================================================
 
     function getConfidence(
         prediction
     ) {
-        if (!prediction) {
-            return 0;
-        }
 
-        const confidence =
-            prediction.probability?.[0] ??
-            prediction.confidence ??
-            prediction.score ??
-            0;
+        const probability =
+            prediction?.probability;
 
-        const value =
-            Number(
-                confidence
-            );
-
-        return Number.isFinite(
-            value
-        )
-            ? value
-            : 0;
-    }
-
-    /* ============================================================
-     * LANDMARKS
-     *
-     * Diagnostics only.
-     * ============================================================ */
-
-    function normalizeLandmarks(
-        prediction
-    ) {
-        const landmarks =
-            prediction?.landmarks ||
-            prediction?.keypoints ||
-            null;
 
         if (
-            !Array.isArray(
-                landmarks
+            Array.isArray(
+                probability
             )
         ) {
-            return [];
+
+            return Number(
+                probability[0]
+            );
         }
 
-        return landmarks
-            .map(point => {
-                if (!point) {
-                    return null;
-                }
 
-                if (
-                    Array.isArray(
-                        point
-                    )
-                ) {
-                    const x =
-                        Number(
-                            point[0]
-                        );
+        if (
+            probability &&
+            typeof probability.length ===
+                "number"
+        ) {
 
-                    const y =
-                        Number(
-                            point[1]
-                        );
+            return Number(
+                probability[0]
+            );
+        }
 
-                    if (
-                        Number.isFinite(x) &&
-                        Number.isFinite(y)
-                    ) {
-                        return {
-                            x,
-                            y
-                        };
-                    }
 
-                    return null;
-                }
+        if (
+            typeof probability ===
+                "number"
+        ) {
 
-                const x =
-                    Number(
-                        point.x ??
-                        point[0]
-                    );
+            return probability;
+        }
 
-                const y =
-                    Number(
-                        point.y ??
-                        point[1]
-                    );
 
-                if (
-                    Number.isFinite(x) &&
-                    Number.isFinite(y)
-                ) {
-                    return {
-                        x,
-                        y
-                    };
-                }
+        if (
+            typeof prediction?.confidence ===
+                "number"
+        ) {
 
-                return null;
-            })
-            .filter(Boolean);
+            return Number(
+                prediction.confidence
+            );
+        }
+
+
+        return NaN;
     }
 
-    /* ============================================================
-     * GEOMETRY VALIDATION
-     * ============================================================ */
 
-    function validateFaceGeometry(
-        rect,
-        imageWidth,
-        imageHeight
+    // ========================================================
+    // RECT NORMALIZATION
+    // ========================================================
+
+    function normalizeRect(
+        topLeft,
+        bottomRight,
+        width,
+        height
     ) {
-        if (!rect) {
-            return {
-                valid: false,
-                reason:
-                    "invalid-rect"
-            };
-        }
-
-        const {
-            x,
-            y,
-            width,
-            height
-        } = rect;
 
         if (
-            !Number.isFinite(x) ||
-            !Number.isFinite(y) ||
-            !Number.isFinite(width) ||
-            !Number.isFinite(height)
+            !topLeft ||
+            !bottomRight
         ) {
-            return {
-                valid: false,
-                reason:
-                    "non-finite-geometry"
-            };
+
+            return null;
         }
 
+
+        const left =
+            Number(
+                topLeft[0]
+            );
+
+
+        const top =
+            Number(
+                topLeft[1]
+            );
+
+
+        const right =
+            Number(
+                bottomRight[0]
+            );
+
+
+        const bottom =
+            Number(
+                bottomRight[1]
+            );
+
+
         if (
-            width <
+            !Number.isFinite(left) ||
+            !Number.isFinite(top) ||
+            !Number.isFinite(right) ||
+            !Number.isFinite(bottom)
+        ) {
+
+            return null;
+        }
+
+
+        const safeLeft =
+            Math.max(
+                0,
+                Math.min(
+                    width,
+                    left
+                )
+            );
+
+
+        const safeTop =
+            Math.max(
+                0,
+                Math.min(
+                    height,
+                    top
+                )
+            );
+
+
+        const safeRight =
+            Math.max(
+                0,
+                Math.min(
+                    width,
+                    right
+                )
+            );
+
+
+        const safeBottom =
+            Math.max(
+                0,
+                Math.min(
+                    height,
+                    bottom
+                )
+            );
+
+
+        const rectWidth =
+            safeRight -
+            safeLeft;
+
+
+        const rectHeight =
+            safeBottom -
+            safeTop;
+
+
+        if (
+            rectWidth <
                 MIN_FACE_SIZE ||
-            height <
+            rectHeight <
                 MIN_FACE_SIZE
         ) {
-            return {
-                valid: false,
-                reason:
-                    "too-small"
-            };
+
+            return null;
         }
 
-        if (
-            width <
-                MIN_VALID_FACE_SIZE ||
-            height <
-                MIN_VALID_FACE_SIZE
-        ) {
-            return {
-                valid: false,
-                reason:
-                    "below-validation-size"
-            };
-        }
-
-        const aspectRatio =
-            width /
-            height;
-
-        if (
-            aspectRatio <
-                MIN_FACE_ASPECT_RATIO ||
-            aspectRatio >
-                MAX_FACE_ASPECT_RATIO
-        ) {
-            return {
-                valid: false,
-                reason:
-                    "invalid-aspect-ratio"
-            };
-        }
-
-        if (
-            width >
-                imageWidth *
-                MAX_SCREEN_FACE_RATIO ||
-            height >
-                imageHeight *
-                MAX_SCREEN_FACE_RATIO
-        ) {
-            return {
-                valid: false,
-                reason:
-                    "too-large"
-            };
-        }
-
-        if (
-            x + width <= 0 ||
-            y + height <= 0 ||
-            x >= imageWidth ||
-            y >= imageHeight
-        ) {
-            return {
-                valid: false,
-                reason:
-                    "outside-image"
-            };
-        }
 
         return {
-            valid: true
+
+            left:
+                safeLeft,
+
+            top:
+                safeTop,
+
+            right:
+                safeRight,
+
+            bottom:
+                safeBottom,
+
+            width:
+                rectWidth,
+
+            height:
+                rectHeight
+
         };
     }
 
-    /* ============================================================
-     * MODEL EXECUTION
-     * ============================================================ */
+
+    // ========================================================
+    // MODEL RUN
+    // ========================================================
 
     async function runModel(
-        input
+        canvas
     ) {
-        await ensureDependencies();
 
-        if (!model) {
+        if (
+            !model
+        ) {
+
             throw new Error(
-                "[FACE] Model not initialized."
+                "BlazeFace model is not initialized."
             );
         }
 
+
+        if (
+            window.tf &&
+            typeof window.tf.engine ===
+                "function"
+        ) {
+
+            window.tf
+                .engine()
+                .startScope();
+        }
+
+
+        const start =
+            performance.now();
+
+
         try {
+
+            metrics.inferenceRuns++;
+
+
             const predictions =
                 await model.estimateFaces(
-                    input,
+                    canvas,
+                    false,
                     false
                 );
 
-            if (
-                !Array.isArray(
+
+            const list =
+                Array.isArray(
                     predictions
                 )
+                    ? predictions
+                    : [];
+
+
+            return list;
+
+        } finally {
+
+            const latency =
+                performance.now() -
+                start;
+
+
+            metrics.totalInferenceLatencyMs +=
+                latency;
+
+
+            metrics.lastInferenceLatencyMs =
+                latency;
+
+
+            if (
+                window.tf &&
+                typeof window.tf.engine ===
+                    "function"
             ) {
-                return [];
+
+                window.tf
+                    .engine()
+                    .endScope();
             }
 
-            return predictions;
-        } catch (error) {
-            console.error(
-                "[FACE] BlazeFace inference failed:",
-                error
-            );
-
-            return [];
         }
     }
 
-    /* ============================================================
-     * TILES
-     * ============================================================ */
+
+    // ========================================================
+    // TILE CREATION
+    // ========================================================
 
     function createTiles(
         width,
         height,
-        tileSize,
-        overlap = TILE_OVERLAP
+        tileSize
     ) {
+
         const tiles = [];
+
 
         if (
             width <= tileSize &&
             height <= tileSize
         ) {
+
             return [
+
                 {
                     x: 0,
                     y: 0,
                     width,
                     height
                 }
+
             ];
         }
+
 
         const step =
             Math.max(
                 1,
-                Math.floor(
+                Math.round(
                     tileSize *
-                    (1 - overlap)
+                    (1 - TILE_OVERLAP)
                 )
             );
 
-        const xPositions = [];
-        const yPositions = [];
-
-        for (
-            let x = 0;
-            x < width;
-            x += step
-        ) {
-            xPositions.push(
-                Math.min(
-                    x,
-                    Math.max(
-                        0,
-                        width - tileSize
-                    )
-                )
-            );
-
-            if (
-                x + tileSize >=
-                width
-            ) {
-                break;
-            }
-        }
 
         for (
             let y = 0;
             y < height;
             y += step
         ) {
-            yPositions.push(
-                Math.min(
-                    y,
-                    Math.max(
-                        0,
-                        height - tileSize
-                    )
-                )
-            );
 
-            if (
-                y + tileSize >=
-                height
-            ) {
-                break;
-            }
-        }
-
-        const uniqueX =
-            [
-                ...new Set(
-                    xPositions
-                )
-            ];
-
-        const uniqueY =
-            [
-                ...new Set(
-                    yPositions
-                )
-            ];
-
-        for (
-            const y of uniqueY
-        ) {
             for (
-                const x of uniqueX
+                let x = 0;
+                x < width;
+                x += step
             ) {
+
                 tiles.push({
+
                     x,
+
                     y,
 
                     width:
@@ -1541,176 +944,225 @@
                             tileSize,
                             height - y
                         )
+
                 });
+
+
+                if (
+                    tiles.length >=
+                    MAX_TILES_PER_PASS
+                ) {
+
+                    return tiles;
+                }
+
+
+                if (
+                    x + tileSize >=
+                    width
+                ) {
+
+                    break;
+                }
+            }
+
+
+            if (
+                y + tileSize >=
+                height
+            ) {
+
+                break;
             }
         }
+
 
         return tiles;
     }
 
+
+    // ========================================================
+    // TILE CANVAS
+    // ========================================================
+
     function createTileCanvas(
-        image,
-        tile
+        source,
+        tile,
+        targetSize
     ) {
-        const canvas =
-            createCanvas(
+
+        const longestSide =
+            Math.max(
                 tile.width,
                 tile.height
             );
 
-        drawImageToCanvas(
-            image,
-            canvas,
+
+        const scale =
+            Math.max(
+                1,
+                targetSize /
+                longestSide
+            );
+
+
+        const width =
+            Math.max(
+                1,
+                Math.round(
+                    tile.width *
+                    scale
+                )
+            );
+
+
+        const height =
+            Math.max(
+                1,
+                Math.round(
+                    tile.height *
+                    scale
+                )
+            );
+
+
+        const result =
+            createCanvas(
+                width,
+                height
+            );
+
+
+        if (!result) {
+
+            return null;
+        }
+
+
+        result.ctx.drawImage(
+
+            source,
 
             tile.x,
             tile.y,
 
             tile.width,
-            tile.height
+            tile.height,
+
+            0,
+            0,
+
+            width,
+            height
+
         );
 
-        return canvas;
+
+        return {
+
+            canvas:
+                result.canvas,
+
+            width,
+
+            height,
+
+            scale
+
+        };
     }
 
-    /* ============================================================
-     * PREDICTION CONVERSION
-     * ============================================================ */
+
+    // ========================================================
+    // PREDICTION -> DETECTION
+    // ========================================================
 
     function convertPrediction(
         prediction,
-
-        sourceX,
-        sourceY,
-
-        sourceWidth,
-        sourceHeight,
-
-        inferenceWidth,
-        inferenceHeight,
-
-        imageWidth,
-        imageHeight
+        canvasWidth,
+        canvasHeight,
+        offsetX,
+        offsetY,
+        coordinateScale
     ) {
-        if (!prediction) {
-            return null;
-        }
 
         const confidence =
             getConfidence(
                 prediction
             );
 
+
+        if (
+            !Number.isFinite(
+                confidence
+            )
+        ) {
+
+            metrics.invalidPredictions++;
+
+            return null;
+        }
+
+
         if (
             confidence <
             FACE_CONFIDENCE_THRESHOLD
         ) {
-            return null;
-        }
 
-        let rawBox = null;
-
-        if (
-            prediction.topLeft &&
-            prediction.bottomRight
-        ) {
-            rawBox = {
-                x:
-                    Number(
-                        prediction
-                            .topLeft[0]
-                    ),
-
-                y:
-                    Number(
-                        prediction
-                            .topLeft[1]
-                    ),
-
-                width:
-                    Number(
-                        prediction
-                            .bottomRight[0]
-                    ) -
-                    Number(
-                        prediction
-                            .topLeft[0]
-                    ),
-
-                height:
-                    Number(
-                        prediction
-                            .bottomRight[1]
-                    ) -
-                    Number(
-                        prediction
-                            .topLeft[1]
-                    )
-            };
-        } else {
-            rawBox =
-                normalizeRect(
-                    prediction.boundingBox ||
-                    prediction.box ||
-                    prediction
-                );
-        }
-
-        if (!rawBox) {
-            metrics.geometryRejected++;
-
-            console.debug(
-                "[FACE] Rejected | reason=invalid-rect"
-            );
+            metrics.rejectedPredictions++;
 
             return null;
         }
 
-        const scaleX =
-            sourceWidth /
-            inferenceWidth;
 
-        const scaleY =
-            sourceHeight /
-            inferenceHeight;
+        const rect =
+            normalizeRect(
 
-        const rect = {
-            x:
-                sourceX +
-                rawBox.x *
-                scaleX,
+                prediction.topLeft,
 
-            y:
-                sourceY +
-                rawBox.y *
-                scaleY,
+                prediction.bottomRight,
 
-            width:
-                rawBox.width *
-                scaleX,
+                canvasWidth,
 
-            height:
-                rawBox.height *
-                scaleY
-        };
+                canvasHeight
 
-        const geometry =
-            validateFaceGeometry(
-                rect,
-                imageWidth,
-                imageHeight
             );
 
-        if (!geometry.valid) {
-            metrics.geometryRejected++;
 
-            console.debug(
-                `[FACE] Rejected | confidence=${confidence.toFixed(4)} | reason=${geometry.reason}`
-            );
+        if (!rect) {
+
+            metrics.invalidPredictions++;
 
             return null;
         }
+
+
+        const left =
+            offsetX +
+            rect.left /
+            coordinateScale;
+
+
+        const top =
+            offsetY +
+            rect.top /
+            coordinateScale;
+
+
+        const right =
+            offsetX +
+            rect.right /
+            coordinateScale;
+
+
+        const bottom =
+            offsetY +
+            rect.bottom /
+            coordinateScale;
+
 
         return {
+
             type:
                 "FACE",
 
@@ -1719,1050 +1171,1009 @@
 
             confidence,
 
-            rect,
+            rect: {
 
-            landmarks:
-                normalizeLandmarks(
-                    prediction
-                )
+                left,
+
+                top,
+
+                right,
+
+                bottom,
+
+                width:
+                    right - left,
+
+                height:
+                    bottom - top
+
+            }
+
         };
     }
 
-    /* ============================================================
-     * FULL IMAGE
-     * ============================================================ */
+
+    // ========================================================
+    // FULL IMAGE PASS
+    // ========================================================
 
     async function detectFullImage(
-        image,
-        imageWidth,
-        imageHeight
+        canvas
     ) {
-        const scale =
-            calculateInferenceScale(
-                imageWidth,
-                imageHeight
-            );
-
-        const inferenceWidth =
-            Math.max(
-                1,
-                Math.round(
-                    imageWidth *
-                    scale
-                )
-            );
-
-        const inferenceHeight =
-            Math.max(
-                1,
-                Math.round(
-                    imageHeight *
-                    scale
-                )
-            );
-
-        const canvas =
-            createCanvas(
-                inferenceWidth,
-                inferenceHeight
-            );
-
-        drawImageToCanvas(
-            image,
-            canvas,
-
-            0,
-            0,
-
-            imageWidth,
-            imageHeight
-        );
 
         const predictions =
             await runModel(
                 canvas
             );
 
-        metrics.rawDetections +=
+
+        metrics.rawPredictions +=
             predictions.length;
 
-        console.log(
-            `[FACE] Full image raw detections=${predictions.length}`
-        );
+
+        metrics.lastRawPredictionCount +=
+            predictions.length;
+
 
         const detections = [];
 
+
         for (
-            const prediction
-            of predictions
+            const prediction of
+            predictions
         ) {
+
             const detection =
                 convertPrediction(
+
                     prediction,
 
+                    canvas.width,
+
+                    canvas.height,
+
                     0,
+
                     0,
 
-                    imageWidth,
-                    imageHeight,
+                    1
 
-                    inferenceWidth,
-                    inferenceHeight,
-
-                    imageWidth,
-                    imageHeight
                 );
 
-            if (detection) {
+
+            if (
+                detection
+            ) {
+
                 detections.push(
                     detection
                 );
+
             }
         }
 
-        console.log(
-            `[FACE] Full image validated=${detections.length}`
-        );
 
         return detections;
     }
 
-    /* ============================================================
-     * TILE DETECTION
-     * ============================================================ */
+
+    // ========================================================
+    // TILED PASS
+    // ========================================================
 
     async function detectTiles(
-        image,
-        imageWidth,
-        imageHeight,
-        tileSize,
-        passName
+        canvas,
+        tileSize
     ) {
+
         const tiles =
             createTiles(
-                imageWidth,
-                imageHeight,
-                tileSize,
-                TILE_OVERLAP
+
+                canvas.width,
+
+                canvas.height,
+
+                tileSize
+
             );
 
+
         console.log(
-            `[FACE] ${passName} pass | tile=${tileSize} | tiles=${tiles.length}`
+            `[FACE] ${tileSize}px pass | tiles=${tiles.length}`
         );
+
 
         const detections = [];
 
+
         for (
-            const tile of tiles
+            let i = 0;
+            i < tiles.length;
+            i++
         ) {
+
+            const tile =
+                tiles[i];
+
+
             const tileCanvas =
                 createTileCanvas(
-                    image,
-                    tile
+
+                    canvas,
+
+                    tile,
+
+                    STANDARD_TILE
+
                 );
 
-            const scale =
-                calculateInferenceScale(
-                    tile.width,
-                    tile.height
-                );
 
-            const inferenceWidth =
-                Math.max(
-                    1,
-                    Math.round(
-                        tile.width *
-                        scale
-                    )
-                );
+            if (!tileCanvas) {
 
-            const inferenceHeight =
-                Math.max(
-                    1,
-                    Math.round(
-                        tile.height *
-                        scale
-                    )
-                );
+                metrics.invalidPredictions++;
 
-            let input =
-                tileCanvas;
-
-            if (
-                inferenceWidth !==
-                    tile.width ||
-                inferenceHeight !==
-                    tile.height
-            ) {
-                const resizedCanvas =
-                    createCanvas(
-                        inferenceWidth,
-                        inferenceHeight
-                    );
-
-                const ctx =
-                    resizedCanvas.getContext(
-                        "2d",
-                        {
-                            willReadFrequently:
-                                true
-                        }
-                    );
-
-                ctx.drawImage(
-                    tileCanvas,
-
-                    0,
-                    0,
-
-                    inferenceWidth,
-                    inferenceHeight
-                );
-
-                input =
-                    resizedCanvas;
+                continue;
             }
 
-            const predictions =
-                await runModel(
-                    input
+
+            let predictions = [];
+
+
+            try {
+
+                predictions =
+                    await runModel(
+                        tileCanvas.canvas
+                    );
+
+            } catch (error) {
+
+                metrics.errors++;
+
+
+                console.warn(
+                    `[FACE] Tile ${i + 1} failed:`,
+                    error?.message ||
+                    error
                 );
 
-            metrics.rawDetections +=
+
+                continue;
+            }
+
+
+            metrics.rawPredictions +=
                 predictions.length;
 
-            if (
-                passName ===
-                "Standard"
-            ) {
-                metrics.standardRaw +=
-                    predictions.length;
-            }
 
-            if (
-                passName ===
-                "Small-face"
-            ) {
-                metrics.smallRaw +=
-                    predictions.length;
-            }
+            metrics.lastRawPredictionCount +=
+                predictions.length;
 
-            if (
-                passName ===
-                "Tiny-face"
-            ) {
-                metrics.tinyRaw +=
-                    predictions.length;
-            }
 
             for (
-                const prediction
-                of predictions
+                const prediction of
+                predictions
             ) {
+
                 const detection =
                     convertPrediction(
+
                         prediction,
 
+                        tileCanvas.width,
+
+                        tileCanvas.height,
+
                         tile.x,
+
                         tile.y,
 
-                        tile.width,
-                        tile.height,
+                        tileCanvas.scale
 
-                        inferenceWidth,
-                        inferenceHeight,
-
-                        imageWidth,
-                        imageHeight
                     );
 
-                if (detection) {
+
+                if (
+                    detection
+                ) {
+
                     detections.push(
                         detection
                     );
+
                 }
             }
         }
 
-        if (
-            passName ===
-            "Standard"
-        ) {
-            metrics.standardValidated =
-                detections.length;
-        }
-
-        if (
-            passName ===
-            "Small-face"
-        ) {
-            metrics.smallValidated =
-                detections.length;
-        }
-
-        if (
-            passName ===
-            "Tiny-face"
-        ) {
-            metrics.tinyValidated =
-                detections.length;
-        }
-
-        console.log(
-            `[FACE] ${passName} validated=${detections.length}`
-        );
 
         return detections;
     }
 
-    /* ============================================================
-     * IOU
-     * ============================================================ */
+
+    // ========================================================
+    // IOU
+    // ========================================================
 
     function calculateIoU(
         a,
         b
     ) {
-        const ax1 = a.x;
-        const ay1 = a.y;
-        const ax2 =
-            a.x + a.width;
-        const ay2 =
-            a.y + a.height;
 
-        const bx1 = b.x;
-        const by1 = b.y;
-        const bx2 =
-            b.x + b.width;
-        const by2 =
-            b.y + b.height;
-
-        const x1 =
+        const left =
             Math.max(
-                ax1,
-                bx1
+                a.rect.left,
+                b.rect.left
             );
 
-        const y1 =
+
+        const top =
             Math.max(
-                ay1,
-                by1
+                a.rect.top,
+                b.rect.top
             );
 
-        const x2 =
+
+        const right =
             Math.min(
-                ax2,
-                bx2
+                a.rect.right,
+                b.rect.right
             );
 
-        const y2 =
+
+        const bottom =
             Math.min(
-                ay2,
-                by2
+                a.rect.bottom,
+                b.rect.bottom
             );
+
 
         const width =
             Math.max(
                 0,
-                x2 - x1
+                right - left
             );
+
 
         const height =
             Math.max(
                 0,
-                y2 - y1
+                bottom - top
             );
 
+
         const intersection =
-            width * height;
+            width *
+            height;
+
 
         if (
             intersection <= 0
         ) {
+
             return 0;
         }
 
+
         const areaA =
-            a.width *
-            a.height;
+            a.rect.width *
+            a.rect.height;
+
 
         const areaB =
-            b.width *
-            b.height;
+            b.rect.width *
+            b.rect.height;
+
 
         const union =
             areaA +
             areaB -
             intersection;
 
-        return union > 0
-            ? intersection / union
-            : 0;
-    }
-
-    /* ============================================================
-     * CENTER
-     * ============================================================ */
-
-    function getCenter(
-        rect
-    ) {
-        return {
-            x:
-                rect.x +
-                rect.width / 2,
-
-            y:
-                rect.y +
-                rect.height / 2
-        };
-    }
-
-    /* ============================================================
-     * SIZE RATIO
-     * ============================================================ */
-
-    function getSizeRatio(
-        a,
-        b
-    ) {
-        const areaA =
-            Math.max(
-                1,
-                a.width *
-                a.height
-            );
-
-        const areaB =
-            Math.max(
-                1,
-                b.width *
-                b.height
-            );
-
-        return (
-            Math.max(
-                areaA,
-                areaB
-            ) /
-            Math.min(
-                areaA,
-                areaB
-            )
-        );
-    }
-
-    /* ============================================================
-     * DUPLICATE TEST
-     * ============================================================ */
-
-    function shouldMergeDetections(
-        first,
-        second
-    ) {
-        const iou =
-            calculateIoU(
-                first.rect,
-                second.rect
-            );
 
         if (
-            iou >=
-            MERGE_IOU_THRESHOLD
+            union <= 0
         ) {
-            return true;
+
+            return 0;
         }
 
-        const a =
-            getCenter(
-                first.rect
-            );
-
-        const b =
-            getCenter(
-                second.rect
-            );
-
-        const dx =
-            a.x - b.x;
-
-        const dy =
-            a.y - b.y;
-
-        const distance =
-            Math.sqrt(
-                dx * dx +
-                dy * dy
-            );
-
-        const minDimension =
-            Math.min(
-                first.rect.width,
-                first.rect.height,
-                second.rect.width,
-                second.rect.height
-            );
-
-        const sizeRatio =
-            getSizeRatio(
-                first.rect,
-                second.rect
-            );
 
         return (
-            distance <=
-            minDimension *
-            DUPLICATE_CENTER_DISTANCE_FACTOR
-        ) &&
-        (
-            sizeRatio <=
-            DUPLICATE_SIZE_RATIO
+            intersection /
+            union
         );
     }
 
-    /* ============================================================
-     * MERGE TWO
-     * ============================================================ */
 
-    function mergeTwoDetections(
-        first,
-        second
-    ) {
-        const totalWeight =
-            Math.max(
-                0.001,
-                first.confidence +
-                second.confidence
-            );
-
-        const primary =
-            first.confidence >=
-            second.confidence
-                ? first
-                : second;
-
-        return {
-            ...primary,
-
-            confidence:
-                Math.max(
-                    first.confidence,
-                    second.confidence
-                ),
-
-            rect: {
-                x:
-                    (
-                        first.rect.x *
-                        first.confidence +
-                        second.rect.x *
-                        second.confidence
-                    ) /
-                    totalWeight,
-
-                y:
-                    (
-                        first.rect.y *
-                        first.confidence +
-                        second.rect.y *
-                        second.confidence
-                    ) /
-                    totalWeight,
-
-                width:
-                    (
-                        first.rect.width *
-                        first.confidence +
-                        second.rect.width *
-                        second.confidence
-                    ) /
-                    totalWeight,
-
-                height:
-                    (
-                        first.rect.height *
-                        first.confidence +
-                        second.rect.height *
-                        second.confidence
-                    ) /
-                    totalWeight
-            }
-        };
-    }
-
-    /* ============================================================
-     * MERGE DETECTIONS
-     * ============================================================ */
+    // ========================================================
+    // MERGE DUPLICATES
+    // ========================================================
 
     function mergeDetections(
         detections
     ) {
-        if (
-            !detections ||
-            !detections.length
-        ) {
-            return [];
-        }
 
         const sorted =
-            [...detections].sort(
-                (a, b) =>
-                    b.confidence -
-                    a.confidence
-            );
+            detections
+                .slice()
+                .sort(
+                    function (
+                        a,
+                        b
+                    ) {
+
+                        return (
+                            b.confidence -
+                            a.confidence
+                        );
+
+                    }
+                );
+
 
         const merged = [];
 
+
         for (
-            const detection
-            of sorted
+            const detection of
+            sorted
         ) {
-            let mergedExisting =
+
+            let duplicate =
                 false;
 
+
             for (
-                let i = 0;
-                i < merged.length;
-                i++
+                const existing of
+                merged
             ) {
+
+                const iou =
+                    calculateIoU(
+                        detection,
+                        existing
+                    );
+
+
+                const cxA =
+                    detection.rect.left +
+                    detection.rect.width /
+                    2;
+
+
+                const cyA =
+                    detection.rect.top +
+                    detection.rect.height /
+                    2;
+
+
+                const cxB =
+                    existing.rect.left +
+                    existing.rect.width /
+                    2;
+
+
+                const cyB =
+                    existing.rect.top +
+                    existing.rect.height /
+                    2;
+
+
+                const distance =
+                    Math.sqrt(
+
+                        Math.pow(
+                            cxA - cxB,
+                            2
+                        ) +
+
+                        Math.pow(
+                            cyA - cyB,
+                            2
+                        )
+
+                    );
+
+
+                const minSize =
+                    Math.min(
+
+                        detection.rect.width,
+
+                        detection.rect.height,
+
+                        existing.rect.width,
+
+                        existing.rect.height
+
+                    );
+
+
+                const sameFace =
+                    iou >=
+                    MERGE_IOU_THRESHOLD ||
+                    distance <=
+                    minSize * 0.50;
+
+
                 if (
-                    shouldMergeDetections(
-                        merged[i],
-                        detection
-                    )
+                    sameFace
                 ) {
-                    merged[i] =
-                        mergeTwoDetections(
-                            merged[i],
+
+                    duplicate =
+                        true;
+
+
+                    if (
+                        detection.confidence >
+                        existing.confidence
+                    ) {
+
+                        Object.assign(
+                            existing,
                             detection
                         );
 
-                    metrics.duplicateMerged++;
+                    }
 
-                    mergedExisting =
-                        true;
 
                     break;
                 }
             }
 
+
             if (
-                !mergedExisting
+                !duplicate
             ) {
+
                 merged.push(
-                    {
-                        ...detection
-                    }
+                    detection
                 );
+
             }
+
         }
 
-        return merged.map(
-            detection => ({
-                type:
-                    "FACE",
 
-                source:
-                    "vision",
-
-                confidence:
-                    detection.confidence,
-
-                rect: {
-                    x:
-                        detection.rect.x,
-
-                    y:
-                        detection.rect.y,
-
-                    width:
-                        detection.rect.width,
-
-                    height:
-                        detection.rect.height
-                },
-
-                ...(detection.landmarks?.length
-                    ? {
-                        landmarks:
-                            detection.landmarks
-                    }
-                    : {})
-            })
-        );
+        return merged;
     }
 
-    /* ============================================================
-     * CLAMP
-     * ============================================================ */
 
-    function clampDetection(
-        detection,
-        imageWidth,
-        imageHeight
-    ) {
-        const r =
-            detection.rect;
-
-        const x1 =
-            Math.max(
-                0,
-                Math.min(
-                    imageWidth,
-                    r.x
-                )
-            );
-
-        const y1 =
-            Math.max(
-                0,
-                Math.min(
-                    imageHeight,
-                    r.y
-                )
-            );
-
-        const x2 =
-            Math.max(
-                0,
-                Math.min(
-                    imageWidth,
-                    r.x + r.width
-                )
-            );
-
-        const y2 =
-            Math.max(
-                0,
-                Math.min(
-                    imageHeight,
-                    r.y + r.height
-                )
-            );
-
-        return {
-            ...detection,
-
-            rect: {
-                x: x1,
-                y: y1,
-
-                width:
-                    Math.max(
-                        0,
-                        x2 - x1
-                    ),
-
-                height:
-                    Math.max(
-                        0,
-                        y2 - y1
-                    )
-            }
-        };
-    }
-
-    /* ============================================================
-     * MAIN DETECTION
-     * ============================================================ */
+    // ========================================================
+    // DETECT
+    // ========================================================
 
     async function detect(
-        source
+        context = {}
     ) {
-        const startTime =
+
+        const start =
             performance.now();
 
-        resetMetrics();
 
-        console.log(
-            `[FACE] Starting face detection | version=${FACE_VERSION}`
-        );
+        metrics.detectionRuns++;
 
-        await ensureDependencies();
+        metrics.lastRawPredictionCount = 0;
 
-        /* --------------------------------------------------------
-         * INPUT NORMALIZATION
-         * -------------------------------------------------------- */
+        metrics.lastAcceptedFaceCount = 0;
 
-        const image =
-            await normalizeImageSource(
-                source
-            );
-
-        /* --------------------------------------------------------
-         * DIMENSIONS
-         * -------------------------------------------------------- */
-
-        const {
-            width: imageWidth,
-            height: imageHeight
-        } =
-            getImageDimensions(
-                image
-            );
-
-        console.log(
-            `[FACE] Image dimensions=${imageWidth}x${imageHeight}`
-        );
-
-        const allDetections = [];
-
-        /* --------------------------------------------------------
-         * FULL IMAGE
-         * -------------------------------------------------------- */
 
         try {
-            const detections =
-                await detectFullImage(
-                    image,
-                    imageWidth,
-                    imageHeight
-                );
 
-            allDetections.push(
-                ...detections
-            );
-        } catch (error) {
-            console.warn(
-                "[FACE] Full-image detection failed:",
-                error
-            );
-        }
+            const ready =
+                await initialize();
 
-        /* --------------------------------------------------------
-         * STANDARD
-         * -------------------------------------------------------- */
 
-        try {
-            const detections =
-                await detectTiles(
-                    image,
-                    imageWidth,
-                    imageHeight,
-                    STANDARD_TILE_SIZE,
-                    "Standard"
-                );
+            if (!ready) {
 
-            allDetections.push(
-                ...detections
-            );
-        } catch (error) {
-            console.warn(
-                "[FACE] Standard detection failed:",
-                error
-            );
-        }
-
-        /* --------------------------------------------------------
-         * SMALL
-         * -------------------------------------------------------- */
-
-        try {
-            const detections =
-                await detectTiles(
-                    image,
-                    imageWidth,
-                    imageHeight,
-                    SMALL_TILE_SIZE,
-                    "Small-face"
-                );
-
-            allDetections.push(
-                ...detections
-            );
-        } catch (error) {
-            console.warn(
-                "[FACE] Small-face detection failed:",
-                error
-            );
-        }
-
-        /* --------------------------------------------------------
-         * TINY
-         * -------------------------------------------------------- */
-
-        try {
-            const detections =
-                await detectTiles(
-                    image,
-                    imageWidth,
-                    imageHeight,
-                    TINY_TILE_SIZE,
-                    "Tiny-face"
-                );
-
-            allDetections.push(
-                ...detections
-            );
-        } catch (error) {
-            console.warn(
-                "[FACE] Tiny-face detection failed:",
-                error
-            );
-        }
-
-        console.log(
-            `[FACE] Validated detections before merge=${allDetections.length}`
-        );
-
-        /* --------------------------------------------------------
-         * MERGE
-         * -------------------------------------------------------- */
-
-        const merged =
-            mergeDetections(
-                allDetections
-            );
-
-        /* --------------------------------------------------------
-         * CLAMP
-         * -------------------------------------------------------- */
-
-        const finalDetections =
-            merged
-                .map(
-                    detection =>
-                        clampDetection(
-                            detection,
-                            imageWidth,
-                            imageHeight
-                        )
-                )
-                .filter(
-                    detection =>
-                        detection.rect.width >
-                            0 &&
-                        detection.rect.height >
-                            0
-                );
-
-        const elapsed =
-            performance.now() -
-            startTime;
-
-        metrics.inferenceTime =
-            elapsed;
-
-        metrics.finalFaces =
-            finalDetections.length;
-
-        console.log(
-            `[FACE] Duplicate detections merged=${metrics.duplicateMerged}`
-        );
-
-        console.log(
-            `[FACE] Geometry rejected=${metrics.geometryRejected}`
-        );
-
-        console.log(
-            `[FACE] Landmark rejected=${metrics.landmarkRejected}`
-        );
-
-        console.log(
-            `[FACE] Final merged faces=${finalDetections.length}`
-        );
-
-        console.log(
-            `[FACE] Inference: ${elapsed.toFixed(2)} ms | faces=${finalDetections.length}`
-        );
-
-        /* --------------------------------------------------------
-         * FACE DETAILS
-         * -------------------------------------------------------- */
-
-        finalDetections.forEach(
-            (
-                detection,
-                index
-            ) => {
-                console.log(
-                    `[FACE] Face ${index + 1}:`,
-                    {
-                        confidence:
-                            Number(
-                                detection.confidence.toFixed(
-                                    4
-                                )
-                            ),
-
-                        x:
-                            Number(
-                                detection.rect.x.toFixed(
-                                    1
-                                )
-                            ),
-
-                        y:
-                            Number(
-                                detection.rect.y.toFixed(
-                                    1
-                                )
-                            ),
-
-                        width:
-                            Number(
-                                detection.rect.width.toFixed(
-                                    1
-                                )
-                            ),
-
-                        height:
-                            Number(
-                                detection.rect.height.toFixed(
-                                    1
-                                )
-                            )
-                    }
+                throw new Error(
+                    "BlazeFace model is unavailable."
                 );
             }
-        );
 
-        return finalDetections;
+
+            const source =
+                await resolveSource(
+                    context
+                );
+
+
+            if (!source) {
+
+                throw new Error(
+                    "No valid screenshot source was provided."
+                );
+            }
+
+
+            const sourceWidth =
+                Number(
+                    source.naturalWidth ||
+                    source.videoWidth ||
+                    source.width
+                );
+
+
+            const sourceHeight =
+                Number(
+                    source.naturalHeight ||
+                    source.videoHeight ||
+                    source.height
+                );
+
+
+            if (
+                !Number.isFinite(
+                    sourceWidth
+                ) ||
+                !Number.isFinite(
+                    sourceHeight
+                ) ||
+                sourceWidth <= 0 ||
+                sourceHeight <= 0
+            ) {
+
+                throw new Error(
+                    "Invalid screenshot dimensions."
+                );
+            }
+
+
+            metrics.lastSourceWidth =
+                sourceWidth;
+
+            metrics.lastSourceHeight =
+                sourceHeight;
+
+
+            console.log(
+                `[FACE] Image dimensions=${sourceWidth}x${sourceHeight}`
+            );
+
+
+            const inference =
+                createInferenceCanvas(
+
+                    source,
+
+                    sourceWidth,
+
+                    sourceHeight
+
+                );
+
+
+            if (!inference) {
+
+                throw new Error(
+                    "Could not create inference canvas."
+                );
+            }
+
+
+            metrics.lastInferenceWidth =
+                inference.width;
+
+            metrics.lastInferenceHeight =
+                inference.height;
+
+
+            const allDetections = [];
+
+
+            // ------------------------------------------------
+            // FULL IMAGE
+            // ------------------------------------------------
+
+            const fullDetections =
+                await detectFullImage(
+                    inference.canvas
+                );
+
+
+            allDetections.push(
+                ...fullDetections
+            );
+
+
+            // ------------------------------------------------
+            // STANDARD
+            // ------------------------------------------------
+
+            const standardDetections =
+                await detectTiles(
+
+                    inference.canvas,
+
+                    STANDARD_TILE
+
+                );
+
+
+            allDetections.push(
+                ...standardDetections
+            );
+
+
+            // ------------------------------------------------
+            // SMALL FACE
+            // ------------------------------------------------
+
+            const smallDetections =
+                await detectTiles(
+
+                    inference.canvas,
+
+                    SMALL_TILE
+
+                );
+
+
+            allDetections.push(
+                ...smallDetections
+            );
+
+
+            // ------------------------------------------------
+            // TINY FACE
+            // ------------------------------------------------
+
+            const tinyDetections =
+                await detectTiles(
+
+                    inference.canvas,
+
+                    TINY_TILE
+
+                );
+
+
+            allDetections.push(
+                ...tinyDetections
+            );
+
+
+            // ------------------------------------------------
+            // MAP BACK TO SOURCE COORDINATES
+            // ------------------------------------------------
+
+            const scaleBack =
+                1 /
+                inference.scale;
+
+
+            const sourceDetections =
+                allDetections.map(
+
+                    function (
+                        detection
+                    ) {
+
+                        return {
+
+                            type:
+                                detection.type,
+
+                            source:
+                                detection.source,
+
+                            confidence:
+                                detection.confidence,
+
+                            rect: {
+
+                                left:
+                                    detection.rect.left *
+                                    scaleBack,
+
+                                top:
+                                    detection.rect.top *
+                                    scaleBack,
+
+                                right:
+                                    detection.rect.right *
+                                    scaleBack,
+
+                                bottom:
+                                    detection.rect.bottom *
+                                    scaleBack,
+
+                                width:
+                                    detection.rect.width *
+                                    scaleBack,
+
+                                height:
+                                    detection.rect.height *
+                                    scaleBack
+
+                            }
+
+                        };
+
+                    }
+                );
+
+
+            console.log(
+                "[FACE] Validated detections before merge:",
+                sourceDetections.length
+            );
+
+
+            const merged =
+                mergeDetections(
+                    sourceDetections
+                );
+
+
+            metrics.acceptedPredictions +=
+                merged.length;
+
+
+            metrics.lastAcceptedFaceCount =
+                merged.length;
+
+
+            metrics.detectedFaces +=
+                merged.length;
+
+
+            for (
+                const detection of
+                merged
+            ) {
+
+                metrics.confidenceSamples.push(
+                    detection.confidence
+                );
+
+            }
+
+
+            console.log(
+                "[FACE] Final merged faces:",
+                merged.length
+            );
+
+
+            return merged;
+
+        } catch (error) {
+
+            metrics.errors++;
+
+
+            console.error(
+                "[FACE] Detection failed:",
+                error?.message ||
+                error
+            );
+
+
+            /*
+             * IMPORTANT
+             *
+             * Do not silently convert model failure
+             * into a successful privacy result.
+             *
+             * content.js already fails closed.
+             */
+
+            throw error;
+
+        } finally {
+
+            const latency =
+                performance.now() -
+                start;
+
+
+            metrics.totalDetectionLatencyMs +=
+                latency;
+
+
+            console.log(
+                "[FACE] Inference:",
+                `${latency.toFixed(2)} ms`,
+                `| faces=${metrics.lastAcceptedFaceCount}`
+            );
+
+        }
     }
 
-    /* ============================================================
-     * METRICS
-     * ============================================================ */
+
+    // ========================================================
+    // METRICS
+    // ========================================================
 
     function getMetrics() {
+
+        const samples =
+            metrics.confidenceSamples;
+
+
+        const averageConfidence =
+            samples.length
+                ? samples.reduce(
+                    function (
+                        sum,
+                        value
+                    ) {
+
+                        return (
+                            sum +
+                            value
+                        );
+
+                    },
+                    0
+                ) /
+                samples.length
+                : 0;
+
+
+        const averageDetectionLatency =
+            metrics.detectionRuns
+                ? metrics.totalDetectionLatencyMs /
+                  metrics.detectionRuns
+                : 0;
+
+
+        const averageInferenceLatency =
+            metrics.inferenceRuns
+                ? metrics.totalInferenceLatencyMs /
+                  metrics.inferenceRuns
+                : 0;
+
+
         return {
-            ...metrics
+
+            version:
+                FACE_VERSION,
+
+            threshold:
+                FACE_CONFIDENCE_THRESHOLD,
+
+            modelLoaded:
+                initialized,
+
+            modelSource:
+                metrics.modelSource,
+
+            modelURL:
+                activeModelURL,
+
+            modelLoadLatencyMs:
+                Number(
+                    metrics.modelLoadLatencyMs.toFixed(2)
+                ),
+
+            detectionRuns:
+                metrics.detectionRuns,
+
+            inferenceRuns:
+                metrics.inferenceRuns,
+
+            averageDetectionLatencyMs:
+                Number(
+                    averageDetectionLatency.toFixed(2)
+                ),
+
+            averageInferenceLatencyMs:
+                Number(
+                    averageInferenceLatency.toFixed(2)
+                ),
+
+            lastInferenceLatencyMs:
+                Number(
+                    metrics.lastInferenceLatencyMs.toFixed(2)
+                ),
+
+            rawPredictions:
+                metrics.rawPredictions,
+
+            lastRawPredictionCount:
+                metrics.lastRawPredictionCount,
+
+            acceptedPredictions:
+                metrics.acceptedPredictions,
+
+            lastAcceptedFaceCount:
+                metrics.lastAcceptedFaceCount,
+
+            detectedFaces:
+                metrics.detectedFaces,
+
+            rejectedPredictions:
+                metrics.rejectedPredictions,
+
+            invalidPredictions:
+                metrics.invalidPredictions,
+
+            averageConfidence:
+                Number(
+                    averageConfidence.toFixed(4)
+                ),
+
+            sourceWidth:
+                metrics.lastSourceWidth,
+
+            sourceHeight:
+                metrics.lastSourceHeight,
+
+            inferenceWidth:
+                metrics.lastInferenceWidth,
+
+            inferenceHeight:
+                metrics.lastInferenceHeight,
+
+            errors:
+                metrics.errors
         };
     }
 
+
+    // ========================================================
+    // RESET
+    // ========================================================
+
     function resetMetrics() {
-        metrics.inferenceTime = 0;
 
-        metrics.rawDetections = 0;
+        metrics.modelLoadLatencyMs = 0;
 
-        metrics.standardRaw = 0;
-        metrics.standardValidated = 0;
+        metrics.modelSource =
+            initialized
+                ? metrics.modelSource
+                : "none";
 
-        metrics.smallRaw = 0;
-        metrics.smallValidated = 0;
+        metrics.detectionRuns = 0;
 
-        metrics.tinyRaw = 0;
-        metrics.tinyValidated = 0;
+        metrics.inferenceRuns = 0;
 
-        metrics.geometryRejected = 0;
+        metrics.totalDetectionLatencyMs = 0;
 
-        metrics.landmarkRejected = 0;
+        metrics.totalInferenceLatencyMs = 0;
 
-        metrics.duplicateMerged = 0;
+        metrics.detectedFaces = 0;
 
-        metrics.finalFaces = 0;
+        metrics.rawPredictions = 0;
+
+        metrics.acceptedPredictions = 0;
+
+        metrics.rejectedPredictions = 0;
+
+        metrics.invalidPredictions = 0;
+
+        metrics.errors = 0;
+
+        metrics.confidenceSamples = [];
+
+        metrics.lastRawPredictionCount = 0;
+
+        metrics.lastAcceptedFaceCount = 0;
+
+        metrics.lastInferenceLatencyMs = 0;
+
+        metrics.lastSourceWidth = 0;
+
+        metrics.lastSourceHeight = 0;
+
+        metrics.lastInferenceWidth = 0;
+
+        metrics.lastInferenceHeight = 0;
     }
 
-    /* ============================================================
-     * PUBLIC API
-     * ============================================================ */
+
+    // ========================================================
+    // PUBLIC API
+    // ========================================================
 
     window.SIHFace = {
+
         version:
             FACE_VERSION,
 
-        init:
-            ensureDependencies,
+        initialize,
 
         detect,
 
@@ -2770,33 +2181,34 @@
 
         resetMetrics,
 
-        config: {
+        threshold:
             FACE_CONFIDENCE_THRESHOLD,
 
+        maxInferenceDimension:
             MAX_INFERENCE_DIMENSION,
 
-            STANDARD_TILE_SIZE,
-            SMALL_TILE_SIZE,
-            TINY_TILE_SIZE,
+        modelSource:
+            function () {
 
-            TILE_OVERLAP,
+                return metrics.modelSource;
 
-            MIN_FACE_SIZE,
-            MIN_VALID_FACE_SIZE,
+            },
 
-            MIN_FACE_ASPECT_RATIO,
-            MAX_FACE_ASPECT_RATIO,
+        isReady:
+            function () {
 
-            MAX_SCREEN_FACE_RATIO,
+                return (
+                    initialized &&
+                    !!model
+                );
 
-            MERGE_IOU_THRESHOLD,
-            DUPLICATE_CENTER_DISTANCE_FACTOR,
-            DUPLICATE_SIZE_RATIO
-        }
+            }
     };
 
+
     console.log(
-        `[FACE] SIH Face module loaded | version=${FACE_VERSION}`
+        "[FACE] SIH Face module loaded | version=",
+        FACE_VERSION
     );
 
 })();
