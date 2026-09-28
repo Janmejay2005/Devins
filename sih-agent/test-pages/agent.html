@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SIH Phase 6 Privacy Agent Test</title>
+<style>
+body{font-family:Arial,sans-serif;margin:0;background:#f3f4f6;color:#111827}
+header{background:#111827;color:#fff;padding:22px;border-bottom:4px solid #22c55e}
+main{max-width:1100px;margin:22px auto;padding:0 16px 80px}
+section{background:#fff;border:1px solid #d1d5db;border-radius:12px;padding:20px;margin:18px 0}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}
+label{font-weight:bold;display:block;margin-bottom:5px}
+input{width:100%;padding:10px;border:1px solid #9ca3af;border-radius:7px}
+button{padding:10px 15px;margin:7px 5px 0 0;border:0;border-radius:7px;font-weight:bold;cursor:pointer}
+.primary{background:#2563eb;color:#fff}.success{background:#16a34a;color:#fff}.secondary{background:#e5e7eb}.danger{background:#dc2626;color:#fff}
+.status{margin-top:10px;padding:10px;background:#ecfdf5;border-radius:7px}
+.faces{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}
+.face{border:1px solid #d1d5db;border-radius:9px;overflow:hidden}.face img{width:100%;height:220px;object-fit:cover;display:block}.face div{padding:9px;font-weight:bold}
+pre{background:#0f172a;color:#d1fae5;padding:15px;border-radius:8px;min-height:70px;white-space:pre-wrap}
+.spacer{height:900px}.off{background:#fff7ed;border:2px dashed #f97316}
+@media(max-width:800px){.faces{grid-template-columns:repeat(2,1fr)}}
+</style>
+</head>
+<body>
+<header><h1>SIH Privacy Browser Agent — Phase 6 Test Page</h1>
+<p>PII + facial images + API simulation + interactive and off-screen targets</p></header>
+<main>
+
+<section>
+<h2>1. Interactive Form</h2>
+<div class="grid">
+<div><label for="fullName">Full Name</label><input id="fullName" name="fullName" placeholder="Enter full name"></div>
+<div><label for="email">Email Address</label><input id="email" name="email" placeholder="name@example.com"></div>
+<div><label for="phone">Phone Number</label><input id="phone" name="phone" placeholder="+91 9876543210"></div>
+<div><label for="city">City</label><input id="city" name="city" placeholder="Bhopal"></div>
+</div>
+<button class="primary" id="fillDemo">Fill Demo Data</button>
+<button class="secondary" id="clearForm">Clear Form</button>
+<button class="success" id="submitTop">Submit Form</button>
+<div id="formStatus" class="status">Waiting for action.</div>
+</section>
+
+<section>
+<h2>2. PII Test Data</h2>
+<p><b>Email:</b> test.user@example.com</p>
+<p><b>Phone:</b> +91 9876543210</p>
+<p><b>Aadhaar:</b> 2345 6789 0123</p>
+<p><b>PAN:</b> ABCDE1234F</p>
+<p><b>Card:</b> 4111 1111 1111 1111</p>
+<p><b>Address:</b> 42 Example Street, Bhopal, Madhya Pradesh</p>
+<p>All values are synthetic test values.</p>
+</section>
+
+<section>
+<h2>3. Facial Image Test Set</h2>
+<p>Public portrait images for exercising local face detection.</p>
+<div class="faces">
+<div class="face"><img src="https://randomuser.me/api/portraits/men/32.jpg" alt="Test portrait 1"><div>Face Test 1</div></div>
+<div class="face"><img src="https://randomuser.me/api/portraits/women/44.jpg" alt="Test portrait 2"><div>Face Test 2</div></div>
+<div class="face"><img src="https://randomuser.me/api/portraits/men/75.jpg" alt="Test portrait 3"><div>Face Test 3</div></div>
+<div class="face"><img src="https://randomuser.me/api/portraits/women/68.jpg" alt="Test portrait 4"><div>Face Test 4</div></div>
+</div>
+</section>
+
+<section>
+<h2>4. Simulated API Response</h2>
+<button class="primary" id="apiButton">Fetch Demo API</button>
+<pre id="apiOutput">No API request made.</pre>
+</section>
+
+<section>
+<h2>5. Action Verification</h2>
+<button class="secondary" id="stateButton">Change Page State</button>
+<button class="danger" id="dialogButton">Open Test Dialog</button>
+<div id="actionState" class="status">Page state: INITIAL</div>
+</section>
+
+<div class="spacer"></div>
+
+<section class="off">
+<h2>6. Off-Screen Target</h2>
+<p>This button is intentionally far below the initial viewport.</p>
+<button class="success" id="offscreenSubmit">Submit Off-Screen Test</button>
+<div id="offscreenStatus" class="status">Not triggered.</div>
+</section>
+
+</main>
+<script>
+const $=id=>document.getElementById(id);
+$("fillDemo").onclick=()=>{
+ $("fullName").value="Test User"; $("email").value="test.user@example.com";
+ $("phone").value="+91 9876543210"; $("city").value="Bhopal";
+ $("formStatus").textContent="Demo data filled.";
+};
+$("clearForm").onclick=()=>{
+ ["fullName","email","phone","city"].forEach(id=>$(id).value="");
+ $("formStatus").textContent="Form cleared.";
+};
+$("submitTop").onclick=()=>{$("formStatus").textContent="TOP FORM SUBMITTED — ACTION VERIFIED.";};
+$("apiButton").onclick=async()=>{
+ $("apiOutput").textContent="Calling simulated API...";
+ await new Promise(r=>setTimeout(r,500));
+ $("apiOutput").textContent=JSON.stringify({
+   status:"success",user_id:"TEST-001",name:"Test User",
+   email:"test.user@example.com",phone:"+91 9876543210",
+   message:"Synthetic API response for privacy-agent testing"
+ },null,2);
+};
+$("stateButton").onclick=()=>{$("actionState").textContent="Page state: CHANGED — VERIFIED";};
+$("dialogButton").onclick=()=>{ $("actionState").textContent="Page state: TEST DIALOG OPENED — VERIFIED"; alert("Synthetic test dialog opened."); };
+$("offscreenSubmit").onclick=()=>{$("offscreenStatus").textContent="OFF-SCREEN SUBMIT CLICKED — ACTION VERIFIED.";};
+</script>
+</body>
+</html>

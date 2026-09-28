@@ -825,6 +825,72 @@ async function captureAndSanitize() {
 
 
 // ============================================================
+// PHASE 6 — SAFE SEMANTIC TARGET
+// ============================================================
+//
+// Allows text/label/name targets only.
+// Arbitrary CSS selectors from the planner are NOT allowed.
+// ============================================================
+
+function normalizeAgentTarget(
+    target
+) {
+
+    if (
+        !target ||
+        typeof target !== "object"
+    ) {
+
+        return null;
+    }
+
+
+    const text =
+        typeof target.text === "string"
+            ? target.text.trim()
+            : "";
+
+
+    const label =
+        typeof target.label === "string"
+            ? target.label.trim()
+            : "";
+
+
+    const name =
+        typeof target.name === "string"
+            ? target.name.trim()
+            : "";
+
+
+    if (
+        !text &&
+        !label &&
+        !name
+    ) {
+
+        return null;
+    }
+
+
+    return {
+
+        ...(text
+            ? { text: text.slice(0, 120) }
+            : {}),
+
+        ...(label
+            ? { label: label.slice(0, 120) }
+            : {}),
+
+        ...(name
+            ? { name: name.slice(0, 120) }
+            : {})
+    };
+}
+
+
+// ============================================================
 // NORMALIZE + VALIDATE AI ACTION
 // ============================================================
 //
@@ -968,6 +1034,30 @@ function normalizeBrowserAction(
     // ========================================================
 
     if (actionName === "click") {
+
+    // PHASE 6 — semantic target (text/label/name), no selectors
+    const semanticTarget =
+        normalizeAgentTarget(
+            action?.target
+        );
+
+    if (semanticTarget) {
+
+        const semanticSubmitIntent =
+            action?.submitIntent === true ||
+            action?.target?.submitIntent === true;
+
+        return {
+            type: "click",
+            target: {
+                ...semanticTarget,
+                submitIntent: semanticSubmitIntent
+            },
+            submitIntent: semanticSubmitIntent,
+            confidence: confidence
+        };
+    }
+
     const x = Number(
         action?.x ??
         action?.target?.x
@@ -1013,6 +1103,13 @@ function normalizeBrowserAction(
         actionName === "type"
     ) {
 
+        // PHASE 6 — semantic target (text/label/name), no selectors
+        const semanticTarget =
+            normalizeAgentTarget(
+                action.target
+            );
+
+
         const x =
             Number(
                 action.x ??
@@ -1028,8 +1125,11 @@ function normalizeBrowserAction(
 
 
         if (
-            !Number.isFinite(x) ||
-            !Number.isFinite(y)
+            !semanticTarget &&
+            (
+                !Number.isFinite(x) ||
+                !Number.isFinite(y)
+            )
         ) {
 
             return {
@@ -1043,8 +1143,11 @@ function normalizeBrowserAction(
 
 
         if (
-            x < 0 ||
-            y < 0
+            !semanticTarget &&
+            (
+                x < 0 ||
+                y < 0
+            )
         ) {
 
             return {
@@ -1166,10 +1269,12 @@ function normalizeBrowserAction(
 
 return {
     type: "type",
-    target: {
-        x: x,
-        y: y
-    },
+    target: semanticTarget
+        ? semanticTarget
+        : {
+            x: x,
+            y: y
+        },
     text: stringValue,
     confidence: confidence
 };
@@ -1315,7 +1420,117 @@ return {
     };
 }
 
+// ============================================================
+// PHASE 6 — REQUEST FRESH PERCEPTION
+// ============================================================
+//
+// The planner must not reuse stale page state.
+//
+// Every browser action starts from a fresh local perception.
+// ============================================================
 
+async function requestFreshAgentPerception(
+    tabId
+) {
+
+    if (
+        !tabId
+    ) {
+
+        return {
+
+            success:
+                false,
+
+            error:
+                "Invalid tab ID."
+        };
+    }
+
+
+    try {
+
+        const response =
+            await chrome.tabs.sendMessage(
+                tabId,
+                {
+                    type:
+                        "GET_AGENT_PERCEPTION"
+                }
+            );
+
+
+        if (
+            !response ||
+            response.success !== true
+        ) {
+
+            return {
+
+                success:
+                    false,
+
+                error:
+                    response?.error ||
+                    "Fresh perception failed."
+            };
+        }
+
+
+        if (
+            !response.perception ||
+            !Array.isArray(
+                response.perception.dom
+            )
+        ) {
+
+            return {
+
+                success:
+                    false,
+
+                error:
+                    "Fresh perception returned invalid data."
+            };
+        }
+
+
+        console.log(
+            "[PHASE 6][PERCEPTION] Received:",
+            {
+                generation:
+                    response.perception.generation,
+
+                elements:
+                    response.perception.elementCount,
+
+                visible:
+                    response.perception.visibleElementCount
+            }
+        );
+
+
+        return response;
+
+    } catch (error) {
+
+        console.error(
+            "[PHASE 6][PERCEPTION] Communication failed:",
+            error?.message ||
+            error
+        );
+
+
+        return {
+
+            success:
+                false,
+
+            error:
+                "Could not communicate with content script."
+        };
+    }
+}
 // ============================================================
 // EXECUTE BROWSER ACTION
 // ============================================================
@@ -1347,10 +1562,64 @@ async function executeBrowserAction(
     // NORMALIZE + VALIDATE
     // ========================================================
 
-    const normalizedAction =
-        normalizeBrowserAction(
-            action
-        );
+    // ========================================================
+// PHASE 6 — ACTION SHAPE NORMALIZATION
+// ========================================================
+//
+// Accept the planner action whether it arrives as:
+//   { action: "click", x, y }
+//   { type: "click", x, y }
+//
+// Also safely unwrap accidental Phase 6 wrappers such as:
+//   { action: { action: "click", ... } }
+//   { result: { action: { action: "click", ... } } }
+//
+// ========================================================
+
+let plannerAction = action;
+
+if (
+    plannerAction?.action &&
+    typeof plannerAction.action === "object"
+) {
+    plannerAction =
+        plannerAction.action;
+}
+
+if (
+    plannerAction?.result?.action &&
+    typeof plannerAction.result.action === "object"
+) {
+    plannerAction =
+        plannerAction.result.action;
+}
+
+console.log(
+    "[PHASE 6][ACTION INPUT]",
+    {
+        hasAction:
+            Boolean(plannerAction?.action),
+
+        hasType:
+            Boolean(plannerAction?.type),
+
+        action:
+            plannerAction?.action ||
+            plannerAction?.type ||
+            "missing",
+
+        keys:
+            plannerAction &&
+            typeof plannerAction === "object"
+                ? Object.keys(plannerAction)
+                : []
+    }
+);
+
+const normalizedAction =
+    normalizeBrowserAction(
+        plannerAction
+    );
 
 
     console.log(
@@ -1430,6 +1699,43 @@ async function executeBrowserAction(
 
             error:
                 "Active tab has no valid ID."
+        };
+    }
+
+
+    // ========================================================
+    // PHASE 6 — FRESH PERCEPTION BEFORE ACTION
+    // ========================================================
+
+    const perception =
+        await requestFreshAgentPerception(
+            tab.id
+        );
+
+
+    if (
+        !perception.success
+    ) {
+
+        console.warn(
+            "[PHASE 6] Action blocked because fresh perception failed:",
+            perception.error
+        );
+
+
+        return {
+
+            success:
+                false,
+
+            action:
+                "perception_failed",
+
+            retryable:
+                true,
+
+            error:
+                perception.error
         };
     }
 

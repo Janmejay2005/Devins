@@ -545,7 +545,31 @@ let ocrBenchmarkInProgress = false;
 
 let lastDetectionSignature = "";
 
+// ============================================================
+// PHASE 6 — AGENT PERCEPTION STATE
+// ============================================================
 
+let agentPerceptionGeneration = 0;
+
+let lastAgentPerception = null;
+
+let lastAgentActionResult = null;
+
+let agentActionInProgress = false;
+
+const AGENT_PERCEPTION_CONFIG = {
+
+    // Small delay before reading the page after an action.
+    // Gives synchronous DOM updates a chance to settle.
+    settleDelayMs: 120,
+
+    // Maximum time allowed for action verification.
+    verificationTimeoutMs: 2500,
+
+    // Maximum number of DOM elements returned to the agent.
+    maxTargets: 100
+
+};
 // ============================================================
 // UTILITY
 // ============================================================
@@ -5304,18 +5328,22 @@ function validateBrowserAction(
     // --------------------------------------------------------
 
     const target = {
-        x:
-            action?.target?.x !== undefined
-                ? action.target.x
-                : action?.x,
+    type: "click",
 
-        y:
-            action?.target?.y !== undefined
-                ? action.target.y
-                : action?.y,
+    x:
+        action?.target?.x !== undefined
+            ? action.target.x
+            : action?.x,
 
-        submitIntent: false
-    };
+    y:
+        action?.target?.y !== undefined
+            ? action.target.y
+            : action?.y,
+
+    submitIntent:
+        action?.submitIntent === true ||
+        action?.target?.submitIntent === true
+};
 
     return {
         action: "click",
@@ -6237,8 +6265,755 @@ function executeWait(
             validation.milliseconds
     };
 }
-
 // ============================================================
+// PHASE 6 — FRESH AGENT PERCEPTION
+// ============================================================
+//
+// Perception is intentionally local.
+//
+// The agent receives safe DOM metadata only.
+// Input values and detected PII values remain local.
+//
+// Every action can request a fresh perception so that
+// coordinates/targets are never assumed to remain valid.
+// ============================================================
+
+function getFreshAgentPerception() {
+
+    const start =
+        performance.now();
+
+    try {
+
+        // Refresh local DOM PII state.
+        detectDOMPII();
+
+
+        // Build a fresh safe DOM snapshot.
+        const domElements =
+            collectSafeDOM();
+
+
+        const viewport = {
+
+            width:
+                window.innerWidth,
+
+            height:
+                window.innerHeight,
+
+            devicePixelRatio:
+                window.devicePixelRatio,
+
+            scrollX:
+                window.scrollX,
+
+            scrollY:
+                window.scrollY,
+
+            documentWidth:
+                document.documentElement
+                    ? document.documentElement.scrollWidth
+                    : window.innerWidth,
+
+            documentHeight:
+                document.documentElement
+                    ? document.documentElement.scrollHeight
+                    : window.innerHeight
+        };
+
+
+        const perception = {
+
+            generation:
+                ++agentPerceptionGeneration,
+
+            timestamp:
+                Date.now(),
+
+            dom:
+                domElements.slice(
+                    0,
+                    AGENT_PERCEPTION_CONFIG.maxTargets
+                ),
+
+            viewport,
+
+            elementCount:
+                domElements.length,
+
+            visibleElementCount:
+                domElements.filter(
+                    element =>
+                        element.in_viewport === true
+                ).length,
+
+            offscreenElementCount:
+                domElements.filter(
+                    element =>
+                        element.in_viewport === false
+                ).length,
+
+            latencyMs:
+                performance.now() - start
+        };
+
+
+        lastAgentPerception =
+            perception;
+
+
+        console.log(
+            "[PHASE 6][PERCEPTION] Fresh:",
+            {
+                generation:
+                    perception.generation,
+
+                elements:
+                    perception.elementCount,
+
+                visible:
+                    perception.visibleElementCount,
+
+                offscreen:
+                    perception.offscreenElementCount,
+
+                scrollY:
+                    viewport.scrollY,
+
+                latency:
+                    perception.latencyMs.toFixed(2) +
+                    " ms"
+            }
+        );
+
+
+        return {
+
+            success:
+                true,
+
+            perception
+        };
+
+    } catch (error) {
+
+        console.error(
+            "[PHASE 6][PERCEPTION] Failed:",
+            error?.message ||
+            error
+        );
+
+
+        return {
+
+            success:
+                false,
+
+            error:
+                "Fresh perception failed."
+        };
+    }
+}
+// ============================================================
+// PHASE 6 — DYNAMIC TARGET DISCOVERY
+// ============================================================
+//
+// Resolves a target from the CURRENT DOM.
+//
+// The agent may provide:
+//
+// {
+//     target: {
+//         text: "Submit"
+//     }
+// }
+//
+// or:
+//
+// {
+//     target: {
+//         label: "Submit"
+//     }
+// }
+//
+// No fixed coordinate is trusted when a semantic target exists.
+// ============================================================
+
+function findDynamicTarget(
+    target
+) {
+
+    if (
+        !target ||
+        typeof target !== "object"
+    ) {
+
+        return {
+
+            success:
+                false,
+
+            error:
+                "Dynamic target is missing."
+        };
+    }
+
+
+    const requestedText =
+        normalizeText(
+            target.text ||
+            target.label ||
+            target.name ||
+            ""
+        ).toLowerCase();
+
+
+    if (!requestedText) {
+
+        return {
+
+            success:
+                false,
+
+            error:
+                "Dynamic target text is missing."
+        };
+    }
+
+
+    const candidates =
+        document.querySelectorAll(
+            [
+                "button",
+                "a",
+                "input",
+                "textarea",
+                "select",
+                "[role='button']",
+                "[role='link']",
+                "[aria-label]"
+            ].join(",")
+        );
+
+
+    const matches = [];
+
+
+    for (
+        const element
+        of candidates
+    ) {
+
+        if (
+            !isVisible(element)
+        ) {
+            continue;
+        }
+
+
+        const tag =
+            element.tagName
+                .toLowerCase();
+
+
+        const type =
+            (
+                element.getAttribute(
+                    "type"
+                ) ||
+                ""
+            ).toLowerCase();
+
+
+        const ariaLabel =
+            normalizeText(
+                element.getAttribute(
+                    "aria-label"
+                ) ||
+                ""
+            );
+
+
+        const name =
+            normalizeText(
+                element.getAttribute(
+                    "name"
+                ) ||
+                ""
+            );
+
+
+        const placeholder =
+            normalizeText(
+                element.getAttribute(
+                    "placeholder"
+                ) ||
+                ""
+            );
+
+
+        let text =
+            normalizeText(
+                element.innerText ||
+                element.textContent ||
+                ""
+            );
+
+
+        if (
+            tag === "input" &&
+            (
+                type === "submit" ||
+                type === "button" ||
+                type === "reset"
+            )
+        ) {
+
+            text =
+                normalizeText(
+                    element.getAttribute(
+                        "value"
+                    ) ||
+                    ""
+                );
+        }
+
+
+        const fields = [
+            text,
+            ariaLabel,
+            name,
+            placeholder
+        ]
+            .filter(Boolean)
+            .map(
+                value =>
+                    value.toLowerCase()
+            );
+
+
+        let score = 0;
+
+
+        for (
+            const field
+            of fields
+        ) {
+
+            if (
+                field === requestedText
+            ) {
+
+                score += 100;
+
+            } else if (
+                field.includes(
+                    requestedText
+                )
+            ) {
+
+                score += 50;
+
+            } else if (
+                requestedText.includes(
+                    field
+                ) &&
+                field.length > 2
+            ) {
+
+                score += 20;
+            }
+        }
+
+
+        if (
+            score <= 0
+        ) {
+            continue;
+        }
+
+
+        const rect =
+            element.getBoundingClientRect();
+
+
+        matches.push({
+
+            element,
+
+            score,
+
+            rect,
+
+            metadata:
+                getElementMetadata(
+                    element
+                )
+        });
+    }
+
+
+    if (
+        matches.length === 0
+    ) {
+
+        return {
+
+            success:
+                false,
+
+            error:
+                `Target "${requestedText}" not found.`
+        };
+    }
+
+
+    matches.sort(
+        (a, b) =>
+            b.score - a.score
+    );
+
+
+    const best =
+        matches[0];
+
+
+    const element =
+        best.element;
+
+
+    console.log(
+        "[PHASE 6][TARGET] Resolved:",
+        {
+            requested:
+                requestedText,
+
+            score:
+                best.score,
+
+            tag:
+                element.tagName,
+
+            x:
+                Math.round(
+                    best.rect.left
+                ),
+
+            y:
+                Math.round(
+                    best.rect.top
+                )
+        }
+    );
+
+
+    return {
+
+        success:
+            true,
+
+        element,
+
+        metadata:
+            best.metadata,
+
+        score:
+            best.score,
+
+        candidateCount:
+            matches.length
+    };
+}
+// ============================================================
+// PHASE 6 — ACTION TARGET RESOLUTION
+// ============================================================
+//
+// Priority:
+//
+// 1. Semantic target currently present in DOM
+// 2. Explicit coordinates
+//
+// Semantic targets are resolved AGAIN immediately before action.
+// ============================================================
+
+function resolveActionTarget(
+    action
+) {
+
+    const target =
+        action?.target;
+
+
+    // --------------------------------------------------------
+    // Semantic target
+    // --------------------------------------------------------
+
+    if (
+        target &&
+        typeof target === "object" &&
+        (
+            target.text ||
+            target.label ||
+            target.name
+        )
+    ) {
+
+        const resolved =
+            findDynamicTarget(
+                target
+            );
+
+
+        if (
+            !resolved.success
+        ) {
+
+            return resolved;
+        }
+
+
+        const rect =
+            resolved.element
+                .getBoundingClientRect();
+
+
+        return {
+
+            success:
+                true,
+
+            element:
+                resolved.element,
+
+            metadata:
+                resolved.metadata,
+
+            x:
+                rect.left +
+                rect.width / 2,
+
+            y:
+                rect.top +
+                rect.height / 2,
+
+            semantic:
+                true
+        };
+    }
+
+
+    // --------------------------------------------------------
+    // Explicit coordinate target
+    // --------------------------------------------------------
+
+    const x =
+        Number(
+            target?.x !== undefined
+                ? target.x
+                : action?.x
+        );
+
+
+    const y =
+        Number(
+            target?.y !== undefined
+                ? target.y
+                : action?.y
+        );
+
+
+    if (
+        !Number.isFinite(x) ||
+        !Number.isFinite(y)
+    ) {
+
+        return {
+
+            success:
+                false,
+
+            error:
+                "Action target has no valid coordinates."
+        };
+    }
+
+
+    return {
+
+        success:
+            true,
+
+        x,
+
+        y,
+
+        semantic:
+            false
+    };
+}
+// ============================================================
+// PHASE 6 — CLICK VERIFICATION
+// ============================================================
+
+function createPageStateSignature() {
+
+    const active =
+        document.activeElement;
+
+
+    const body =
+        document.body;
+
+
+    return [
+
+        window.location.href,
+
+        window.scrollX,
+
+        window.scrollY,
+
+        document.title,
+
+        body
+            ? body.innerText.length
+            : 0,
+
+        active?.tagName ||
+            "",
+
+        active?.id ||
+            "",
+
+        active?.getAttribute(
+            "name"
+        ) ||
+            ""
+    ].join("|");
+}
+
+
+function waitForPageStateChange(
+    beforeSignature,
+    timeoutMs =
+        AGENT_PERCEPTION_CONFIG
+            .verificationTimeoutMs
+) {
+
+    return new Promise(
+        resolve => {
+
+            const start =
+                performance.now();
+
+
+            function check() {
+
+                const afterSignature =
+                    createPageStateSignature();
+
+
+                if (
+                    afterSignature !==
+                    beforeSignature
+                ) {
+
+                    resolve({
+
+                        changed:
+                            true,
+
+                        latencyMs:
+                            performance.now() -
+                            start
+                    });
+
+                    return;
+                }
+
+
+                if (
+                    performance.now() -
+                    start >=
+                    timeoutMs
+                ) {
+
+                    resolve({
+
+                        changed:
+                            false,
+
+                        latencyMs:
+                            performance.now() -
+                            start
+                    });
+
+                    return;
+                }
+
+
+                requestAnimationFrame(
+                    check
+                );
+            }
+
+
+            requestAnimationFrame(
+                check
+            );
+        }
+    );
+}
+// ============================================================
+// PHASE 6 — TYPE VERIFICATION
+// ============================================================
+//
+// We never return the typed value.
+//
+// Verification is based on the actual target element and
+// event/focus state only.
+// ============================================================
+
+function verifyTypeTarget(
+    targetElement
+) {
+
+    if (
+        !targetElement
+    ) {
+
+        return {
+
+            verified:
+                false,
+
+            reason:
+                "Target element unavailable."
+        };
+    }
+
+
+    const active =
+        document.activeElement;
+
+
+    const verified =
+        active ===
+        targetElement;
+
+
+    return {
+
+        verified,
+
+        reason:
+            verified
+                ? "Target received focus."
+                : "Target did not receive focus."
+    };
+}
+//============================================================
 // EXECUTE BROWSER ACTION
 // ============================================================
 //
@@ -6252,210 +7027,666 @@ function executeWait(
 // Fail closed on anything unexpected.
 // ============================================================
 
-function executeBrowserAction(
+// ============================================================
+// EXECUTE BROWSER ACTION
+// ============================================================
+// PHASE 6
+//
+// Flow:
+//
+//     VALIDATE
+//        ↓
+//     FRESH PERCEPTION
+//        ↓
+//     RESOLVE TARGET
+//        ↓
+//     EXECUTE
+//        ↓
+//     VERIFY
+//        ↓
+//     RETURN SAFE RESULT
+//
+// The next action must perform another fresh perception.
+// ============================================================
+
+async function executeBrowserAction(
     action
 ) {
 
-    // --------------------------------------------------------
-    // GLOBAL ACTION SAFETY GATE
-    // --------------------------------------------------------
-
-    const validation =
-        validateBrowserAction(
-            action
-        );
-
     if (
-        !validation.valid
-    ) {
-
-        console.warn(
-            "[SAFETY] Browser action blocked:",
-            validation.error
-        );
-
-        if (
-            validation.requiresScroll
-        ) {
-
-            return {
-                success: false,
-
-                action:
-                    "scroll_required",
-
-                error:
-                    validation.error,
-
-                x:
-                    validation.x,
-
-                y:
-                    validation.y,
-
-                retryable:
-                    true
-            };
-        }
-
-        return {
-    success: false,
-
-    action:
-        validation.action ||
-        "action_blocked",
-
-    retryable:
-        validation.retryable === true,
-
-    unsafe:
-        validation.unsafe === true,
-
-    error:
-        validation.error ||
-        "Browser action rejected by local safety policy"
-};
-    }
-
-
-    // --------------------------------------------------------
-    // NORMALIZED ACTION TYPE
-    // --------------------------------------------------------
-
-    const actionType =
-        validation.action;
-
-
-    // --------------------------------------------------------
-    // NONE
-    // --------------------------------------------------------
-
-    if (
-        actionType === "none"
+        agentActionInProgress
     ) {
 
         return {
-            success: true,
+
+            success:
+                false,
 
             action:
-                "none"
+                "action_blocked",
+
+            retryable:
+                true,
+
+            error:
+                "Another browser action is already in progress."
         };
     }
 
 
-    // --------------------------------------------------------
-    // CLICK
-    // --------------------------------------------------------
+    agentActionInProgress =
+        true;
 
-    if (
-        actionType === "click"
-    ) {
 
-        const target = {
-    x:
-        action?.target?.x !== undefined
-            ? action.target.x
-            : action?.x,
+    const actionStart =
+        performance.now();
 
-    y:
-        action?.target?.y !== undefined
-            ? action.target.y
-            : action?.y,
 
-    submitIntent:
-        action?.submitIntent === true ||
-        action?.target?.submitIntent === true
-};
+    try {
 
-return executeClick(
-    target
+        // ====================================================
+        // 1. LOCAL SAFETY VALIDATION
+        // ====================================================
+
+        const validation =
+            validateBrowserAction(
+                action
+            );
+
+
+        if (
+            !validation.valid
+        ) {
+
+            console.warn(
+    "[PHASE 6][SAFETY] Action blocked:",
+    validation.error ||
+    validation.reason ||
+    "Unknown validation failure"
 );
-    }
 
 
-    // --------------------------------------------------------
-    // TYPE
-    // --------------------------------------------------------
+            return {
 
-    if (
-        actionType === "type"
-    ) {
+                success:
+                    false,
 
-        const target =
-            action?.target ||
-            {
-                x:
-                    action?.x,
+                action:
+                    validation.action ||
+                    "action_blocked",
 
-                y:
-                    action?.y
+                retryable:
+                    validation.retryable === true,
+
+                unsafe:
+                    validation.unsafe === true,
+
+                error:
+                    validation.error ||
+                    "Browser action rejected."
+            };
+        }
+
+
+        const actionType =
+            validation.action;
+
+
+        // ====================================================
+        // 2. NONE
+        // ====================================================
+
+        if (
+            actionType === "none"
+        ) {
+
+            return {
+
+                success:
+                    true,
+
+                action:
+                    "none",
+
+                perceptionGeneration:
+                    lastAgentPerception?.generation ||
+                    0
+            };
+        }
+
+
+        // ====================================================
+        // 3. FRESH PERCEPTION
+        // ====================================================
+
+        const perceptionResult =
+            getFreshAgentPerception();
+
+
+        if (
+            !perceptionResult.success
+        ) {
+
+            return {
+
+                success:
+                    false,
+
+                action:
+                    "perception_failed",
+
+                retryable:
+                    true,
+
+                error:
+                    perceptionResult.error
+            };
+        }
+
+
+        const perception =
+            perceptionResult.perception;
+
+
+        // ====================================================
+        // 4. CLICK
+        // ====================================================
+
+        if (
+            actionType === "click"
+        ) {
+
+            let resolvedTarget =
+                null;
+
+
+            if (
+                action?.target &&
+                (
+                    action.target.text ||
+                    action.target.label ||
+                    action.target.name
+                )
+            ) {
+
+                resolvedTarget =
+                    resolveActionTarget(
+                        action
+                    );
+
+
+                if (
+                    !resolvedTarget.success
+                ) {
+
+                    return {
+
+                        success:
+                            false,
+
+                        action:
+                            "target_not_found",
+
+                        retryable:
+                            true,
+
+                        error:
+                            resolvedTarget.error
+                    };
+                }
+
+            } else {
+
+                resolvedTarget =
+                    resolveActionTarget(
+                        action
+                    );
+
+
+                if (
+                    !resolvedTarget.success
+                ) {
+
+                    return {
+
+                        success:
+                            false,
+
+                        action:
+                            "target_invalid",
+
+                        retryable:
+                            true,
+
+                        error:
+                            resolvedTarget.error
+                    };
+                }
+            }
+
+
+            const beforeSignature =
+                createPageStateSignature();
+
+
+            const clickResult =
+    executeClick({
+
+        type:
+            "click",
+
+        x:
+            resolvedTarget.x,
+
+        y:
+            resolvedTarget.y,
+
+        submitIntent:
+            action?.submitIntent === true ||
+            action?.target?.submitIntent === true
+    });
+
+
+            if (
+                !clickResult?.success
+            ) {
+
+                return {
+
+                    ...clickResult,
+
+                    perceptionGeneration:
+                        perception.generation
+                };
+            }
+
+
+            const verification =
+                await waitForPageStateChange(
+                    beforeSignature
+                );
+
+
+            benchmarkMetrics.verificationLatencyMs =
+                verification.latencyMs;
+
+
+            lastAgentActionResult = {
+
+                action:
+                    "click",
+
+                verified:
+                    verification.changed,
+
+                perceptionGeneration:
+                    perception.generation
             };
 
-        const value =
-            action?.value !== undefined
-                ? action.value
-                : action?.text;
 
-        return executeType(
-            target,
-            value
-        );
+            console.log(
+                "[PHASE 6][VERIFY] CLICK:",
+                {
+                    verified:
+                        verification.changed,
+
+                    latency:
+                        verification.latencyMs.toFixed(2) +
+                        " ms"
+                }
+            );
+
+
+            return {
+
+                success:
+                    true,
+
+                action:
+                    "click",
+
+                verified:
+                    verification.changed,
+
+                verification:
+                    verification.changed
+                        ? "page_changed"
+                        : "click_dispatched",
+
+                perceptionGeneration:
+                    perception.generation
+            };
+        }
+
+
+        // ====================================================
+        // 5. TYPE
+        // ====================================================
+
+        if (
+            actionType === "type"
+        ) {
+
+            const resolvedTarget =
+                resolveActionTarget(
+                    action
+                );
+
+
+            if (
+                !resolvedTarget.success
+            ) {
+
+                return {
+
+                    success:
+                        false,
+
+                    action:
+                        "target_not_found",
+
+                    retryable:
+                        true,
+
+                    error:
+                        resolvedTarget.error
+                };
+            }
+
+
+            const target = {
+
+                x:
+                    resolvedTarget.x,
+
+                y:
+                    resolvedTarget.y
+            };
+
+
+            const value =
+                action?.value !== undefined
+                    ? action.value
+                    : action?.text;
+
+
+            const typeResult =
+                executeType(
+                    target,
+                    value
+                );
+
+
+            if (
+                !typeResult?.success
+            ) {
+
+                return {
+
+                    ...typeResult,
+
+                    perceptionGeneration:
+                        perception.generation
+                };
+            }
+
+
+            const targetElement =
+                document.elementFromPoint(
+                    resolvedTarget.x,
+                    resolvedTarget.y
+                );
+
+
+            const verification =
+                verifyTypeTarget(
+                    targetElement
+                );
+
+
+            lastAgentActionResult = {
+
+                action:
+                    "type",
+
+                verified:
+                    verification.verified,
+
+                perceptionGeneration:
+                    perception.generation
+            };
+
+
+            console.log(
+                "[PHASE 6][VERIFY] TYPE:",
+                {
+                    verified:
+                        verification.verified,
+
+                    reason:
+                        verification.reason
+                }
+            );
+
+
+            return {
+
+                success:
+                    true,
+
+                action:
+                    "type",
+
+                verified:
+                    verification.verified,
+
+                verification:
+                    verification.reason,
+
+                perceptionGeneration:
+                    perception.generation
+            };
+        }
+
+
+        // ====================================================
+        // 6. SCROLL
+        // ====================================================
+
+        if (
+            actionType === "scroll"
+        ) {
+
+            const amount =
+                action?.amount !== undefined
+                    ? action.amount
+                    : action?.value;
+
+
+            const scrollResult =
+                executeScroll(
+                    amount
+                );
+
+
+            if (
+                !scrollResult?.success
+            ) {
+
+                return {
+
+                    ...scrollResult,
+
+                    perceptionGeneration:
+                        perception.generation
+                };
+            }
+
+
+            // Wait briefly for scroll position to settle.
+            await new Promise(
+                resolve =>
+                    setTimeout(
+                        resolve,
+                        AGENT_PERCEPTION_CONFIG
+                            .settleDelayMs
+                    )
+            );
+
+
+            const newPerception =
+                getFreshAgentPerception();
+
+
+            lastAgentActionResult = {
+
+                action:
+                    "scroll",
+
+                verified:
+                    true,
+
+                perceptionGeneration:
+                    perception.generation,
+
+                nextPerceptionGeneration:
+                    newPerception
+                        .perception
+                        ?.generation ||
+                    null
+            };
+
+
+            console.log(
+                "[PHASE 6][VERIFY] SCROLL:",
+                {
+                    verified:
+                        true,
+
+                    nextPerception:
+                        newPerception
+                            .perception
+                            ?.generation ||
+                        null
+                }
+            );
+
+
+            return {
+
+                success:
+                    true,
+
+                action:
+                    "scroll",
+
+                amount,
+
+                verified:
+                    true,
+
+                perceptionGeneration:
+                    perception.generation,
+
+                nextPerception:
+                    newPerception.success
+                        ? newPerception.perception
+                        : null
+            };
+        }
+
+
+        // ====================================================
+        // 7. WAIT
+        // ====================================================
+
+        if (
+            actionType === "wait"
+        ) {
+
+            const duration =
+                action?.amount !== undefined
+                    ? action.amount
+                    : action?.value;
+
+
+            const waitResult =
+                executeWait(
+                    duration
+                );
+
+
+            if (
+                !waitResult?.success
+            ) {
+
+                return waitResult;
+            }
+
+
+            await new Promise(
+                resolve =>
+                    setTimeout(
+                        resolve,
+                        waitResult.delay
+                    )
+            );
+
+
+            const newPerception =
+                getFreshAgentPerception();
+
+
+            return {
+
+                success:
+                    true,
+
+                action:
+                    "wait",
+
+                delay:
+                    waitResult.delay,
+
+                verified:
+                    true,
+
+                perceptionGeneration:
+                    perception.generation,
+
+                nextPerception:
+                    newPerception.success
+                        ? newPerception.perception
+                        : null
+            };
+        }
+
+
+        return {
+
+            success:
+                false,
+
+            action:
+                "action_blocked",
+
+            unsafe:
+                true,
+
+            error:
+                "Unsupported browser action."
+        };
+
+    } finally {
+
+        benchmarkMetrics.actionExecutionLatencyMs =
+            performance.now() -
+            actionStart;
+
+
+        agentActionInProgress =
+            false;
     }
-
-
-    // --------------------------------------------------------
-    // SCROLL
-    // --------------------------------------------------------
-
-    if (
-        actionType === "scroll"
-    ) {
-
-        const amount =
-            action?.amount !== undefined
-                ? action.amount
-                : action?.value;
-
-        return executeScroll(
-            amount
-        );
-    }
-
-
-    // --------------------------------------------------------
-    // WAIT
-    // --------------------------------------------------------
-
-    if (
-        actionType === "wait"
-    ) {
-
-        const duration =
-            action?.amount !== undefined
-                ? action.amount
-                : action?.value;
-
-        return executeWait(
-            duration
-        );
-    }
-
-
-    // --------------------------------------------------------
-    // FAIL CLOSED
-    // --------------------------------------------------------
-
-    return {
-        success: false,
-
-        action:
-            "action_blocked",
-
-        unsafe: true,
-
-        error:
-            "Browser action failed closed"
-    };
 }
 // ============================================================
 // MESSAGE HANDLER
@@ -7734,7 +8965,47 @@ console.log(
 
 
         // ====================================================
-        // EXECUTE ACTION
+        // PHASE 6 — GET FRESH AGENT PERCEPTION
+        // ====================================================
+
+        if (
+            message.type ===
+            "GET_AGENT_PERCEPTION"
+        ) {
+
+            const result =
+                getFreshAgentPerception();
+
+
+            if (
+                !result.success
+            ) {
+
+                sendResponse(
+                    result
+                );
+
+                return true;
+            }
+
+
+            sendResponse({
+
+                success:
+                    true,
+
+                perception:
+                    result.perception
+
+            });
+
+
+            return true;
+        }
+
+
+        // ====================================================
+        // PHASE 6 — EXECUTE ACTION
         // ====================================================
 
         if (
@@ -7745,38 +9016,79 @@ console.log(
             const actionStart =
                 performance.now();
 
-            const result =
-                executeBrowserAction(
-                    message.action
+
+            executeBrowserAction(
+                message.action
+            )
+                .then(
+                    function (result) {
+
+                        benchmarkMetrics.actionExecutionLatencyMs =
+                            performance.now() -
+                            actionStart;
+
+
+                        console.log(
+                            "[BENCHMARK] Action execution latency:",
+                            benchmarkMetrics
+                                .actionExecutionLatencyMs
+                                .toFixed(2),
+                            "ms"
+                        );
+
+
+                        console.log(
+                            "[PHASE 6][ACTION] Completed:",
+                            {
+                                success:
+                                    result?.success === true,
+
+                                action:
+                                    result?.action ||
+                                    "unknown",
+
+                                verified:
+                                    result?.verified === true,
+
+                                perceptionGeneration:
+                                    result?.perceptionGeneration ||
+                                    0
+                            }
+                        );
+
+
+                        sendResponse(
+                            result
+                        );
+                    }
+                )
+                .catch(
+                    function (error) {
+
+                        console.error(
+                            "[PHASE 6][ACTION] Failed:",
+                            error?.message ||
+                            error
+                        );
+
+
+                        sendResponse({
+
+                            success:
+                                false,
+
+                            action:
+                                "action_failed",
+
+                            retryable:
+                                true,
+
+                            error:
+                                error?.message ||
+                                "Browser action failed."
+                        });
+                    }
                 );
-
-            benchmarkMetrics.actionExecutionLatencyMs =
-                performance.now() -
-                actionStart;
-
-            console.log(
-                "[BENCHMARK] Action execution latency:",
-                benchmarkMetrics.actionExecutionLatencyMs.toFixed(2),
-                "ms"
-            );
-
-
-            console.log(
-    "[ACTION] Execution completed:",
-    {
-        success:
-            result?.success === true,
-
-        action:
-            result?.action ||
-            "unknown"
-    }
-);
-
-
-            sendResponse(
-                result
-            );
 
 
             return true;

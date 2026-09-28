@@ -1,44 +1,9 @@
-// ============================================================
-// SIH PRIVACY BROWSER AGENT
-// popup.js
-//
-// COMPLETE MULTI-STEP PRIVATE AGENT
-//
-// FLOW:
-//
-// 1. Read user task
-// 2. Capture current tab locally
-// 3. Detect PII locally
-// 4. Sanitize screenshot locally
-// 5. Send ONLY sanitized screenshot + safe metadata + task
-// 6. Receive one browser action
-// 7. Execute action locally
-// 8. Capture a NEW sanitized state
-// 9. If task is compound, plan next safe action
-// 10. Repeat until task is complete
-//
-// PRIVACY:
-//
-// - Raw screenshot never goes to FastAPI.
-// - PII detection happens locally.
-// - Screenshot redaction happens locally.
-// - Safe DOM metadata only.
-// - Normal webpage remains readable/editable.
-// - PII is NOT visually masked on the live webpage.
-// - Sensitive pixels are masked only in captured screenshots.
-// - Password / credential / OTP fields are never typed into.
-// - The agent never reads an existing sensitive value.
-// - TYPE requires an explicit user-provided value.
-// ============================================================
+// SIH Privacy Browser Agent — multi-step private agent
+// Raw screenshots stay local; only sanitized context reaches FastAPI.
 
 console.log(
     " SIH Privacy Agent popup loaded"
 );
-
-
-// ============================================================
-// DOM ELEMENTS
-// ============================================================
 
 const captureButton =
     document.getElementById(
@@ -94,7 +59,6 @@ if (!captureButton) {
     );
 }
 
-
 if (!taskInput) {
 
     console.error(
@@ -102,38 +66,19 @@ if (!taskInput) {
     );
 }
 
-
-// ============================================================
-// AGENT CONFIGURATION
-// ============================================================
-
 const API_URL =
     "http://127.0.0.1:8000/analyze";
 
-
-// Maximum browser actions for one request.
 const MAX_AGENT_STEPS = 4;
 
-
-// Delay after browser action before recapture.
-//
-// Increased from 150ms to 500ms to reduce the chance of
-// Chrome captureVisibleTab quota errors.
 const ACTION_SETTLE_DELAY_MS = 500;
 
-
-// Chrome capture quota retry configuration.
 const MAX_CAPTURE_RETRIES = 5;
 
 const CAPTURE_RETRY_DELAY_MS = 500;
-// Browser-action retry configuration.
 const MAX_ACTION_RETRIES = 2;
 
 const ACTION_RETRY_DELAY_MS = 400;
-
-// ============================================================
-// AGENT STATE
-// ============================================================
 
 let agentRunning = false;
 
@@ -143,10 +88,6 @@ let totalPlannerLatency = 0;
 
 let totalNetworkLatency = 0;
 let currentActionRetryCount = 0;
-
-// ============================================================
-// RESULT UI
-// ============================================================
 
 function showResult(
     title,
@@ -158,11 +99,9 @@ function showResult(
         return;
     }
 
-
     result.classList.remove(
         "hidden"
     );
-
 
     if (resultTitle) {
 
@@ -175,18 +114,12 @@ function showResult(
                 : "result-title error";
     }
 
-
     if (resultContent) {
 
         resultContent.innerHTML =
             content;
     }
 }
-
-
-// ============================================================
-// LOADING STATE
-// ============================================================
 
 function setLoading(
     loading
@@ -195,11 +128,9 @@ function setLoading(
     agentRunning =
         loading;
 
-
     if (!captureButton) {
         return;
     }
-
 
     if (loading) {
 
@@ -224,40 +155,17 @@ function setLoading(
     }
 }
 
-
-// ============================================================
-// GET USER TASK
-// ============================================================
-
 function getTask() {
 
     const task =
         taskInput?.value?.trim() ||
         "";
 
-
     return (
         task ||
         "Analyze the page and choose the safest useful action."
     );
 }
-
-
-// ============================================================
-// DETECT COMPOUND TYPE + SUBMIT TASK
-// ============================================================
-//
-// Examples:
-//
-// Fill the Full Name field with "Amit Kumar" and submit
-//
-// Fill the Full Name field with "Amit Kumar" then submit
-//
-// Enter "Amit Kumar" in Full Name and submit the form
-//
-// Type "Amit Kumar" into Full Name, then click submit
-//
-// ============================================================
 
 function isSubmitCompoundTask(
     task
@@ -269,16 +177,13 @@ function isSubmitCompoundTask(
             .replace(/\s+/g, " ")
             .trim();
 
-
     const hasTypeIntent =
         /\b(fill|enter|type|write|input|insert|put)\b/i
             .test(t);
 
-
     const hasSubmitIntent =
         /\bsubmit\b/i
             .test(t);
-
 
     return (
         hasTypeIntent &&
@@ -286,20 +191,21 @@ function isSubmitCompoundTask(
     );
 }
 
+function isScrollClickCompoundTask(
+    task
+) {
 
-// ============================================================
-// EXPLICIT VALUE CHECK
-// ============================================================
-//
-// The agent must never obtain a value by reading the webpage.
-//
-// Example:
-//
-// Fill Full Name with "Amit Kumar"
-//
-// contains an explicit value.
-//
-// ============================================================
+    const t =
+        String(task || "")
+            .toLowerCase()
+            .replace(/\s+/g, " ")
+            .trim();
+
+    return (
+        /\bscroll\b/i.test(t) &&
+        /\bclick\b/i.test(t)
+    );
+}
 
 function hasExplicitQuotedValue(
     task
@@ -309,7 +215,6 @@ function hasExplicitQuotedValue(
         return false;
     }
 
-
     const patterns = [
 
         /["“][^"”]+["”]/,
@@ -317,17 +222,11 @@ function hasExplicitQuotedValue(
         /['‘][^'’]+['’]/
     ];
 
-
     return patterns.some(
         pattern =>
             pattern.test(task)
     );
 }
-
-
-// ============================================================
-// VALIDATE COMPOUND TASK
-// ============================================================
 
 function validateCompoundTask(
     task
@@ -339,7 +238,6 @@ function validateCompoundTask(
             valid: true
         };
     }
-
 
     if (!hasExplicitQuotedValue(task)) {
 
@@ -357,16 +255,105 @@ function validateCompoundTask(
         };
     }
 
-
     return {
         valid: true
     };
 }
 
+function buildAgentTaskSteps(
+    task
+) {
 
-// ============================================================
-// LOCAL CAPTURE + SANITIZATION
-// ============================================================
+    const original =
+        String(task || "").trim();
+
+    const normalized =
+        original
+            .replace(/\s+/g, " ")
+            .trim();
+
+    if (isSubmitCompoundTask(original)) {
+
+        const valueMatch =
+            normalized.match(
+                /["“]([^"”]+)["”]|['‘]([^'’]+)['’]/
+            );
+
+        const value =
+            valueMatch
+                ? (
+                    valueMatch[1] ??
+                    valueMatch[2] ??
+                    ""
+                ).trim()
+                : "";
+
+        let fieldTarget = "";
+
+        const findFieldMatch =
+            normalized.match(
+                /\b(?:find|locate)\s+(?:the\s+)?(.+?)\s+field\b/i
+            );
+
+        if (findFieldMatch) {
+            fieldTarget =
+                findFieldMatch[1].trim();
+        } else {
+            const fillFieldMatch =
+                normalized.match(
+                    /\b(?:fill|enter|type|write|input|insert|put)\s+(?:the\s+)?(.+?)\s+field\b/i
+                );
+
+            if (fillFieldMatch) {
+                fieldTarget =
+                    fillFieldMatch[1].trim();
+            }
+        }
+
+        if (fieldTarget && value) {
+            return [
+                `Click the ${fieldTarget} field`,
+                `Type "${value}" into the ${fieldTarget} field`,
+                "Click Submit"
+            ];
+        }
+    }
+
+    if (isScrollClickCompoundTask(original)) {
+
+        const clickButtonMatch =
+            normalized.match(
+                /\bclick\s+(?:the\s+)?(.+?)\s+button\b/i
+            );
+
+        const clickTargetMatch =
+            normalized.match(
+                /\bclick\s+(?:the\s+)?(.+?)(?:[.!?]|$)/i
+            );
+
+        const target =
+            (
+                clickButtonMatch
+                    ? clickButtonMatch[1]
+                    : clickTargetMatch
+                        ? clickTargetMatch[1]
+                        : ""
+            )
+                .replace(/\bbutton\b$/i, "")
+                .trim();
+
+        if (target) {
+            return [
+                `Scroll down to find the ${target} button`,
+                `Click the ${target} button`
+            ];
+        }
+    }
+
+    return [
+        original
+    ];
+}
 
 async function captureSanitizedScreen() {
 
@@ -374,14 +361,12 @@ async function captureSanitizedScreen() {
         " Requesting local capture + sanitization..."
     );
 
-
     const response =
         await chrome.runtime.sendMessage({
 
             type:
                 "CAPTURE_AND_SANITIZE"
         });
-
 
     console.log(
     "[PRIVACY] Capture response received:",
@@ -397,14 +382,12 @@ async function captureSanitizedScreen() {
     }
 );
 
-
     if (!response) {
 
         throw new Error(
             "No response received from background service."
         );
     }
-
 
     if (!response.success) {
 
@@ -414,7 +397,6 @@ async function captureSanitizedScreen() {
         );
     }
 
-
     if (!response.sanitizedImage) {
 
         throw new Error(
@@ -422,31 +404,22 @@ async function captureSanitizedScreen() {
         );
     }
 
-
     console.log(
         " Sanitized screenshot received."
     );
-
 
     console.log(
         " Local PII detections:",
         response.detections?.length || 0
     );
 
-
     console.log(
         " Safe DOM elements:",
         response.dom_elements?.length || 0
     );
 
-
     return response;
 }
-
-
-// ============================================================
-// EXECUTE ONE BROWSER ACTION
-// ============================================================
 
 async function executeAction(
     action
@@ -479,7 +452,6 @@ async function executeAction(
     }
 );
 
-
     if (!action) {
 
         return {
@@ -488,7 +460,6 @@ async function executeAction(
                 "No browser action was returned."
         };
     }
-
 
     const response =
         await chrome.runtime.sendMessage({
@@ -499,7 +470,6 @@ async function executeAction(
             action:
                 action
         });
-
 
     console.log(
     "[ACTION] Execution response:",
@@ -519,14 +489,8 @@ async function executeAction(
     }
 );
 
-
     return response;
 }
-
-
-// ============================================================
-// WAIT FOR DOM / INPUT TO SETTLE
-// ============================================================
 
 async function waitForActionToSettle() {
 
@@ -539,11 +503,6 @@ async function waitForActionToSettle() {
     );
 }
 
-
-// ============================================================
-// CHECK CHROME CAPTURE QUOTA ERROR
-// ============================================================
-
 function isCaptureQuotaError(
     error
 ) {
@@ -555,7 +514,6 @@ function isCaptureQuotaError(
             ""
         )
             .toLowerCase();
-
 
     return (
         message.includes(
@@ -578,27 +536,13 @@ function isCaptureQuotaError(
     );
 }
 
-
-// ============================================================
-// FINAL / POST-ACTION SANITIZED CAPTURE
-// ============================================================
-//
-// Chrome limits captureVisibleTab() calls per second.
-//
-// This function retries quota failures instead of immediately
-// failing the agent.
-//
-// ============================================================
-
 async function captureFinalState() {
 
     console.log(
         " Capturing final/new sanitized page state..."
     );
 
-
     let lastError = null;
-
 
     for (
         let attempt = 1;
@@ -612,15 +556,12 @@ async function captureFinalState() {
                 ` Capture attempt ${attempt}/${MAX_CAPTURE_RETRIES}`
             );
 
-
             const finalCapture =
                 await captureSanitizedScreen();
-
 
             console.log(
                 " New sanitized screenshot captured."
             );
-
 
             return finalCapture;
 
@@ -628,7 +569,6 @@ async function captureFinalState() {
 
             lastError =
                 error;
-
 
             if (
                 !isCaptureQuotaError(
@@ -639,11 +579,9 @@ async function captureFinalState() {
                 throw error;
             }
 
-
             console.warn(
                 ` Chrome capture quota hit on attempt ${attempt}.`
             );
-
 
             if (
                 attempt <
@@ -653,7 +591,6 @@ async function captureFinalState() {
                 console.log(
                     ` Waiting ${CAPTURE_RETRY_DELAY_MS} ms before retry...`
                 );
-
 
                 await new Promise(
                     resolve =>
@@ -666,13 +603,14 @@ async function captureFinalState() {
         }
     }
 
-
     throw new Error(
         lastError?.message ||
         "Could not capture sanitized screen after retries."
     );
 }
+
 function sanitizeDomLabel(label) {
+
     const text =
         String(label || "")
             .replace(/\s+/g, " ")
@@ -683,7 +621,6 @@ function sanitizeDomLabel(label) {
         return "";
     }
 
-    // Do not transmit obvious sensitive values.
     const sensitivePatterns = [
     /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i,
     /\b(?:\+?91[-\s]?)?[6-9]\d{9}\b/,
@@ -702,26 +639,12 @@ function sanitizeDomLabel(label) {
 
     return text;
 }
-// ============================================================
-// FINAL PRIVACY PAYLOAD GATE
-// ============================================================
-//
-// This is the final client-side security boundary before
-// anything is transmitted to FastAPI.
-//
-// Rules:
-// - Screenshot must be sanitized.
-// - Detection values are forbidden.
-// - DOM values are forbidden.
-// - Password / OTP / credential data are forbidden.
-// - URL query parameters and fragments are forbidden.
-// - Only safe metadata is allowed.
-// ============================================================
 
 function buildPrivacySafePayload(
     captureResponse,
     task
 ) {
+
     if (
         !captureResponse ||
         typeof captureResponse !== "object"
@@ -746,10 +669,6 @@ function buildPrivacySafePayload(
         );
     }
 
-    // --------------------------------------------------------
-    // DETECTIONS
-    // --------------------------------------------------------
-
     const rawDetections =
         Array.isArray(
             captureResponse.detections
@@ -770,8 +689,6 @@ function buildPrivacySafePayload(
                     );
                 }
 
-                // Existing detected values must NEVER
-                // cross the privacy boundary.
                 if (
                     Object.prototype.hasOwnProperty.call(
                         detection,
@@ -843,10 +760,6 @@ function buildPrivacySafePayload(
             }
         );
 
-    // --------------------------------------------------------
-    // DOM METADATA
-    // --------------------------------------------------------
-
     const rawDomElements =
         Array.isArray(
             captureResponse.dom_elements
@@ -916,8 +829,6 @@ function buildPrivacySafePayload(
             element.role || ""
         ),
 
-    // Only retain semantic metadata.
-    // Never transmit arbitrary DOM text.
    label:
     element.is_button
         ? sanitizeDomLabel(
@@ -958,12 +869,6 @@ function buildPrivacySafePayload(
             }
         );
 
-   
-
-// --------------------------------------------------------
-// PAGE URL
-// --------------------------------------------------------
-
 const rawPageUrl =
     String(
         captureResponse.page_url || ""
@@ -975,18 +880,12 @@ try {
     const parsedUrl =
         new URL(rawPageUrl);
 
-    // Never transmit query parameters or fragments.
-    // Only the origin is required for planner context.
     safePageUrl =
         parsedUrl.origin;
 
 } catch (_) {
     safePageUrl = "";
 }
-
-    // --------------------------------------------------------
-    // VIEWPORT
-    // --------------------------------------------------------
 
     const rawViewport =
         captureResponse.viewport;
@@ -1012,26 +911,8 @@ try {
             }
             : null;
 
-    // --------------------------------------------------------
-    // TASK
-    // --------------------------------------------------------
-    //
-    // The task is intentionally preserved because the user
-    // may explicitly provide a value to type.
-    //
-    // Example:
-    // Fill Full Name with "Amit Kumar"
-    //
-    // This is user-provided instruction, NOT webpage-derived
-    // PII.
-    // --------------------------------------------------------
-
     const safeTask =
         String(task || "").trim();
-
-    // --------------------------------------------------------
-    // FINAL PAYLOAD
-    // --------------------------------------------------------
 
     return {
         screenshot:
@@ -1053,9 +934,6 @@ try {
             safeTask
     };
 }
-// ============================================================
-// API — ANALYZE SANITIZED CONTEXT
-// ============================================================
 
 async function analyzeSanitizedContext(
     captureResponse,
@@ -1065,26 +943,21 @@ async function analyzeSanitizedContext(
     const sanitizedImage =
         captureResponse.sanitizedImage;
 
-
     const detections =
         captureResponse.detections ||
         [];
-
 
     const domElements =
         captureResponse.dom_elements ||
         [];
 
-
     const pageUrl =
         captureResponse.page_url ||
         "";
 
-
     const viewport =
         captureResponse.viewport ||
         null;
-
 
     console.log();
 
@@ -1100,7 +973,6 @@ async function analyzeSanitizedContext(
         "=========================================="
     );
 
-
     console.log(
         " Screenshot:",
         sanitizedImage
@@ -1108,18 +980,15 @@ async function analyzeSanitizedContext(
             : "MISSING"
     );
 
-
     console.log(
         " PII detections:",
         detections.length
     );
 
-
     console.log(
         " Safe DOM elements:",
         domElements.length
     );
-
 
     console.log(
     "[PLANNER] Task prepared:",
@@ -1130,37 +999,17 @@ hasExplicitValue:
     }
 );
 
-
     console.log(
     "[PLANNER] Page context available:",
     Boolean(pageUrl)
 );
 
-
     console.log(
         "=========================================="
     );
 
-
     const startTime =
         performance.now();
-
-
-    // ========================================================
-    // IMPORTANT PRIVACY BOUNDARY
-    //
-    // Only sanitizedImage is transmitted.
-    //
-    // No raw screenshot is sent.
-    // ========================================================
-
-    // ========================================================
-// FINAL PRIVACY GATE
-// ========================================================
-//
-// Nothing reaches FastAPI until the payload passes the
-// client-side privacy validation.
-// ========================================================
 
 const privacySafePayload =
     buildPrivacySafePayload(
@@ -1215,20 +1064,16 @@ const response =
         }
     );
 
-
     const networkLatency =
         performance.now() -
         startTime;
 
-
     totalNetworkLatency +=
         networkLatency;
-
 
     console.log(
         ` Network latency: ${networkLatency.toFixed(2)} ms`
     );
-
 
     if (!response.ok) {
 
@@ -1237,10 +1082,8 @@ const response =
         );
     }
 
-
     const data =
         await response.json();
-
 
     console.log(
     "[PLANNER] Response received:",
@@ -1267,7 +1110,6 @@ const response =
     }
 );
 
-
     if (!data.success) {
 
         throw new Error(
@@ -1276,27 +1118,22 @@ const response =
         );
     }
 
-
     const action =
         data.action ||
         {};
-
 
     const actionType =
         action.action ||
         action.type ||
         "none";
 
-
     const confidence =
         action.confidence ??
         0;
 
-
     const reason =
         action.reason ||
         "No reason provided";
-
 
     const plannerLatency =
         Number(
@@ -1305,10 +1142,8 @@ const response =
             0
         );
 
-
     totalPlannerLatency +=
         plannerLatency;
-
 
     return {
 
@@ -1338,11 +1173,6 @@ const response =
     };
 }
 
-
-// ============================================================
-// ACTION LABEL
-// ============================================================
-
 function actionLabel(
     actionType
 ) {
@@ -1365,7 +1195,6 @@ function actionLabel(
             "NONE"
     };
 
-
     return (
         labels[actionType] ||
         String(
@@ -1375,11 +1204,6 @@ function actionLabel(
     );
 }
 
-
-// ============================================================
-// ACTION DESCRIPTION
-// ============================================================
-
 function describeAction(
     action
 ) {
@@ -1388,7 +1212,6 @@ function describeAction(
         action?.action ||
         action?.type ||
         "none";
-
 
     if (type === "type") {
 
@@ -1400,7 +1223,6 @@ function describeAction(
         );
     }
 
-
     if (type === "click") {
 
         return (
@@ -1410,7 +1232,6 @@ function describeAction(
         );
     }
 
-
     if (type === "scroll") {
 
         return (
@@ -1419,20 +1240,13 @@ function describeAction(
         );
     }
 
-
     if (type === "wait") {
 
         return "WAIT";
     }
 
-
     return "NO ACTION";
 }
-
-
-// ============================================================
-// ACTION HISTORY
-// ============================================================
 
 function renderActionHistory() {
 
@@ -1443,7 +1257,6 @@ function renderActionHistory() {
 
         return "";
     }
-
 
     const rows =
         completedActions
@@ -1469,7 +1282,6 @@ function renderActionHistory() {
             )
             .join("");
 
-
     return `
         <div class="state-title">
             AGENT ACTION HISTORY
@@ -1478,11 +1290,6 @@ function renderActionHistory() {
         ${rows}
     `;
 }
-
-
-// ============================================================
-// SHOW NO ACTION
-// ============================================================
 
 function showNoActionResult(
     task,
@@ -1497,7 +1304,6 @@ function showNoActionResult(
         plannerLatency,
         detections
     } = analysis;
-
 
     showResult(
 
@@ -1578,11 +1384,6 @@ function showNoActionResult(
     );
 }
 
-
-// ============================================================
-// SHOW EXECUTION FAILURE
-// ============================================================
-
 function showExecutionFailure(
     task,
     analysis,
@@ -1598,12 +1399,10 @@ function showExecutionFailure(
         detections
     } = analysis;
 
-
     const errorMessage =
         executionResponse?.error ||
         executionResponse?.result?.error ||
         "Unknown browser execution error.";
-
 
     showResult(
 
@@ -1690,11 +1489,6 @@ function showExecutionFailure(
     );
 }
 
-
-// ============================================================
-// SHOW FINAL SUCCESS
-// ============================================================
-
 function showAgentCompleted(
     task,
     finalCapture,
@@ -1705,15 +1499,12 @@ function showAgentCompleted(
         finalCapture?.sanitizedImage ||
         "";
 
-
     const finalDetections =
         finalCapture?.detections ||
         [];
 
-
     const stepCount =
         completedActions.length;
-
 
     const history =
         completedActions
@@ -1738,7 +1529,6 @@ function showAgentCompleted(
                 }
             )
             .join("");
-
 
     showResult(
 
@@ -1835,11 +1625,6 @@ function showAgentCompleted(
     );
 }
 
-
-// ============================================================
-// SHOW STEP PROGRESS
-// ============================================================
-
 function showProgress(
     task,
     stepNumber,
@@ -1915,10 +1700,6 @@ function showProgress(
     );
 }
 
-
-// ============================================================
-// MAIN MULTI-STEP AGENT PIPELINE
-// ============================================================
 function isRetryableActionFailure(response) {
 
     if (
@@ -1928,7 +1709,6 @@ function isRetryableActionFailure(response) {
         return false;
     }
 
-    // Unsafe failures are always terminal.
     if (
         response.unsafe === true
     ) {
@@ -1940,7 +1720,6 @@ function isRetryableActionFailure(response) {
     );
 }
 
-
 function getExecutionError(response) {
 
     return (
@@ -1949,7 +1728,6 @@ function getExecutionError(response) {
         "Unknown browser execution error."
     );
 }
-
 
 async function retryFailedAction(
     analysis,
@@ -1969,7 +1747,6 @@ async function retryFailedAction(
         )
     );
 
-
     await new Promise(
         resolve =>
             setTimeout(
@@ -1978,31 +1755,25 @@ async function retryFailedAction(
             )
     );
 
-
     try {
 
         console.log(
             "[RETRY] Capturing a fresh sanitized state before re-planning."
         );
 
-
         const freshCapture =
             await captureFinalState();
 
-
         currentCaptureRef.value =
             freshCapture;
-
 
         console.log(
             "[RETRY] Fresh sanitized state captured."
         );
 
-
         console.log(
             `[RETRY] Re-planning failed ${analysis.actionType} action.`
         );
-
 
         return true;
 
@@ -2013,7 +1784,6 @@ async function retryFailedAction(
             captureError?.message ||
             captureError
         );
-
 
         return false;
     }
@@ -2030,26 +1800,17 @@ async function captureAndAnalyze() {
         return;
     }
 
-
-    // ========================================================
-    // RESET STATE
-    // ========================================================
-
     const overallStart =
         performance.now();
 
-
     completedActions = [];
 
-
     totalPlannerLatency = 0;
-
 
     totalNetworkLatency = 0;
 currentActionRetryCount = 0;
 
     setLoading(true);
-
 
     if (result) {
 
@@ -2058,16 +1819,10 @@ currentActionRetryCount = 0;
         );
     }
 
-
     try {
-
-        // ====================================================
-        // STEP 0 — READ USER TASK
-        // ====================================================
 
         const originalTask =
             getTask();
-
 
         console.log();
 
@@ -2083,7 +1838,6 @@ currentActionRetryCount = 0;
             "=========================================="
         );
 
-
         console.log(
     "[AGENT] User task received:",
     {
@@ -2096,16 +1850,10 @@ currentActionRetryCount = 0;
     }
 );
 
-
-        // ====================================================
-        // SAFETY VALIDATION
-        // ====================================================
-
         const validation =
             validateCompoundTask(
                 originalTask
             );
-
 
         if (!validation.valid) {
 
@@ -2130,56 +1878,39 @@ currentActionRetryCount = 0;
                 false
             );
 
-
             return;
         }
-
-
-        // ====================================================
-        // DETERMINE TASK TYPE
-        // ====================================================
 
         const compoundTask =
             isSubmitCompoundTask(
                 originalTask
             );
 
-
         console.log(
             " Compound task:",
             compoundTask
         );
 
+        const agentTaskSteps =
+            buildAgentTaskSteps(
+                originalTask
+            );
 
-        // ====================================================
-        // CURRENT PLANNER TASK
-        // ====================================================
+        let currentTaskIndex = 0;
 
         let currentTask =
-            originalTask;
+            agentTaskSteps[currentTaskIndex];
 
-
-        // ====================================================
-        // INITIAL SANITIZED CAPTURE
-        // ====================================================
+        console.log(
+            "[AGENT] Ordered task steps:",
+            agentTaskSteps
+        );
 
         let currentCapture =
             await captureSanitizedScreen();
 
-
-        // Most recent valid sanitized state.
-        //
-        // This is important because if Chrome temporarily
-        // blocks another capture after an action, we can
-        // still safely display the previous sanitized state.
-
         let finalCapture =
             currentCapture;
-
-
-        // ====================================================
-        // AGENT LOOP
-        // ====================================================
 
         for (
             let step = 1;
@@ -2201,7 +1932,6 @@ currentActionRetryCount = 0;
                 "=========================================="
             );
 
-
             console.log(
     "[PLANNER] Task prepared:",
     {
@@ -2211,38 +1941,25 @@ currentActionRetryCount = 0;
     }
 );
 
-
-            // =================================================
-            // PLAN CURRENT ACTION
-            // =================================================
-
             const analysis =
                 await analyzeSanitizedContext(
                     currentCapture,
                     currentTask
                 );
 
-
             console.log(
                 " Action:",
                 analysis.actionType
             );
-
 
             console.log(
                 " Confidence:",
                 analysis.confidence
             );
 
-
             console.log(
     "[PLANNER] Reason received."
 );
-
-
-            // =================================================
-            // NO ACTION
-            // =================================================
 
             if (
                 analysis.actionType ===
@@ -2252,7 +1969,6 @@ currentActionRetryCount = 0;
                 console.log(
                     " Planner returned no safe action."
                 );
-
 
                 if (
                     completedActions.length > 0
@@ -2280,14 +1996,8 @@ currentActionRetryCount = 0;
                     );
                 }
 
-
                 return;
             }
-
-
-            // =================================================
-            // SHOW PROGRESS
-            // =================================================
 
             showProgress(
 
@@ -2304,11 +2014,6 @@ currentActionRetryCount = 0;
                 analysis.detections
             );
 
-
-            // =================================================
-            // EXECUTE ACTION
-            // =================================================
-
             console.log(
                 ` Executing step ${step}:`,
                 describeAction(
@@ -2316,12 +2021,10 @@ currentActionRetryCount = 0;
                 )
             );
 
-
             const executionResponse =
                 await executeAction(
                     analysis.action
                 );
-
 
             console.log(
     "[ACTION] Execution response:",
@@ -2341,16 +2044,10 @@ currentActionRetryCount = 0;
     }
 );
 
-
             const executionSuccess =
                 Boolean(
                     executionResponse?.success
                 );
-
-
-                       // =================================================
-            // EXECUTION FAILURE
-            // =================================================
 
             if (!executionSuccess) {
 
@@ -2390,11 +2087,6 @@ currentActionRetryCount = 0;
                     }
                 );
 
-
-                // =================================================
-                // RETRY TRANSIENT FAILURE
-                // =================================================
-
                 if (
                     retryable &&
                     !unsafeFailure &&
@@ -2404,12 +2096,10 @@ currentActionRetryCount = 0;
 
                     currentActionRetryCount += 1;
 
-
                     const retryState = {
                         value:
                             currentCapture
                     };
-
 
                     showResult(
                         "Retrying Browser Action",
@@ -2463,7 +2153,6 @@ currentActionRetryCount = 0;
                         true
                     );
 
-
                     const retryPrepared =
                         await retryFailedAction(
                             analysis,
@@ -2471,7 +2160,6 @@ currentActionRetryCount = 0;
                             currentActionRetryCount,
                             retryState
                         );
-
 
                     if (
                         retryPrepared
@@ -2488,11 +2176,6 @@ currentActionRetryCount = 0;
                     }
                 }
 
-
-                // =================================================
-                // TERMINAL FAILURE
-                // =================================================
-
                 if (
                     unsafeFailure
                 ) {
@@ -2508,7 +2191,6 @@ currentActionRetryCount = 0;
                     );
                 }
 
-
                 showExecutionFailure(
                     originalTask,
                     analysis,
@@ -2519,17 +2201,7 @@ currentActionRetryCount = 0;
                     return;
 }
 
-
-// =================================================
-// SUCCESSFUL ACTION
-// =================================================
-
 currentActionRetryCount = 0;
-
-
-// =================================================
-// RECORD SUCCESSFUL ACTION
-// =================================================
 
 completedActions.push({
     action:
@@ -2550,32 +2222,14 @@ completedActions.push({
         analysis.networkLatency
 });
 
-
 console.log(
     `Step ${step} executed successfully.`
 );
-
 
 console.log(
     "Completed actions:",
     completedActions.length
 );
-           
-
-            // =================================================
-            // FINAL COMPOUND ACTION
-            // =================================================
-            //
-            // If this is the CLICK SUBMIT step, the requested
-            // browser task is already complete.
-            //
-            // Do NOT make another planner request.
-            //
-            // We only TRY to capture a final sanitized state.
-            // If Chrome's screenshot quota is temporarily hit,
-            // we keep the last valid sanitized screenshot.
-            //
-            // =================================================
 
             if (
                 compoundTask &&
@@ -2599,34 +2253,20 @@ console.log(
                     "=========================================="
                 );
 
-
                 console.log(
-                    " TYPE step completed."
+                    " Final CLICK SUBMIT step completed."
                 );
-
-
-                console.log(
-                    " CLICK SUBMIT step completed."
-                );
-
 
                 console.log(
                     " All requested browser actions executed successfully."
                 );
 
-
-                // ------------------------------------------------
-                // TRY FINAL SANITIZED CAPTURE
-                // ------------------------------------------------
-
                 await waitForActionToSettle();
-
 
                 try {
 
                     finalCapture =
                         await captureFinalState();
-
 
                     console.log(
                         " Final sanitized state captured."
@@ -2638,17 +2278,14 @@ console.log(
                         " Final sanitized capture unavailable:"
                     );
 
-
                     console.warn(
                         finalCaptureError
                     );
-
 
                     console.log(
                         " Keeping previous valid sanitized state."
                     );
                 }
-
 
                 showAgentCompleted(
 
@@ -2660,24 +2297,12 @@ console.log(
                     overallStart
                 );
 
-
                 return;
             }
-
-
-            // =================================================
-            // CAPTURE NEW SANITIZED STATE
-            // =================================================
-            //
-            // For non-final actions, a fresh state is required
-            // before the next planner step.
-            //
-            // =================================================
 
             console.log(
                 "Capturing NEW state after action..."
             );
-
 
             try {
 
@@ -2690,7 +2315,6 @@ console.log(
                     "Post-action capture failed:",
                     captureError
                 );
-
 
                 showResult(
 
@@ -2740,205 +2364,40 @@ console.log(
                     false
                 );
 
-
                 return;
             }
-
-
-            // =================================================
-            // IMPORTANT:
-            //
-            // The newly captured state is now the state the
-            // planner must reason over.
-            // =================================================
 
             currentCapture =
                 finalCapture;
 
-
-            // =================================================
-            // COMPOUND TASK — TYPE → CLICK SUBMIT
-            // =================================================
-            //
-            // After TYPE, switch planner task from the original
-            // compound instruction to the explicit remaining
-            // action: Click Submit.
-            //
-            // =================================================
-
             if (
-                compoundTask &&
-                analysis.actionType === "type"
+                currentTaskIndex + 1 <
+                agentTaskSteps.length
             ) {
 
-                console.log();
-
-                console.log(
-                    "=========================================="
-                );
-
-                console.log(
-                    " COMPOUND TASK CONTINUATION"
-                );
-
-                console.log(
-                    "=========================================="
-                );
-
-
-                console.log(
-                    " TYPE step completed."
-                );
-
-
-                console.log(
-                    " Next required action: CLICK SUBMIT"
-                );
-
-
-                // ---------------------------------------------
-                // IMPORTANT
-                //
-                // The original compound task is not sent again.
-                //
-                // ---------------------------------------------
+                currentTaskIndex += 1;
 
                 currentTask =
-                    "Click Submit";
-
-
-                // ---------------------------------------------
-                // finalCapture is already a NEW sanitized
-                // screenshot captured after TYPE.
-                // ---------------------------------------------
-
-                currentCapture =
-                    finalCapture;
-
+                    agentTaskSteps[currentTaskIndex];
 
                 console.log(
-                    " Next planner task:",
-                    currentTask
+                    "[AGENT] Next task step:",
+                    {
+                        index:
+                            currentTaskIndex,
+                        task:
+                            currentTask,
+                        afterAction:
+                            analysis.actionType
+                    }
                 );
-
-
-                console.log(
-                    " Fresh sanitized state assigned."
-                );
-
-
-                console.log(
-                    " Continuing to next planner step..."
-                );
-
-
-                console.log(
-                    "=========================================="
-                );
-
-
-                // ---------------------------------------------
-                // CONTINUE LOOP
-                // ---------------------------------------------
 
                 continue;
             }
-
-
-            // =================================================
-            // COMPOUND TASK — SCROLL CONTINUATION
-            // =================================================
-            //
-            // THIS IS THE IMPORTANT FIX.
-            //
-            // If the Submit button is off-screen, the planner
-            // returns SCROLL.
-            //
-            // SCROLL IS NOT THE END OF A COMPOUND TASK.
-            //
-            // The fresh sanitized screenshot above contains the
-            // newly visible page state. We must continue the loop
-            // so the planner can now see and click Submit.
-            //
-            // =================================================
-
-            if (
-                compoundTask &&
-                analysis.actionType === "scroll"
-            ) {
-
-                console.log();
-
-                console.log(
-                    "=========================================="
-                );
-
-                console.log(
-                    " COMPOUND TASK SCROLL CONTINUATION"
-                );
-
-                console.log(
-                    "=========================================="
-                );
-
-
-                console.log(
-                    " SCROLL step completed."
-                );
-
-
-                console.log(
-                    " Re-planning after scroll..."
-                );
-
-
-                // finalCapture is the fresh sanitized state
-                // captured after the scroll action.
-
-                currentCapture =
-                    finalCapture;
-
-
-                console.log(
-                    " Fresh sanitized state assigned after scroll."
-                );
-
-
-                console.log(
-                    " Next planner task:",
-                    currentTask
-                );
-
-
-                console.log(
-                    " Continuing to next planner step..."
-                );
-
-
-                console.log(
-                    "=========================================="
-                );
-
-
-                // IMPORTANT:
-                //
-                // Do NOT show completion here.
-                //
-                // Continue to the next loop iteration so
-                // "Click Submit" is planned and executed.
-
-                continue;
-            }
-
-
-            // =================================================
-            // SINGLE ACTION TASK
-            // =================================================
 
             console.log(
                 " Single-step task completed."
             );
-
 
             showAgentCompleted(
 
@@ -2950,14 +2409,8 @@ console.log(
                 overallStart
             );
 
-
             return;
         }
-
-
-        // ====================================================
-        // MAX STEPS REACHED
-        // ====================================================
 
         showResult(
 
@@ -2997,7 +2450,6 @@ console.log(
             false
         );
 
-
     } catch (error) {
 
         console.error(
@@ -3008,7 +2460,6 @@ console.log(
             "Unknown pipeline error"
     }
 );
-
 
         showResult(
 
@@ -3033,11 +2484,9 @@ console.log(
             false
         );
 
-
     } finally {
 
         setLoading(false);
-
 
         console.log();
 
@@ -3053,19 +2502,16 @@ console.log(
             "=========================================="
         );
 
-
         console.log(
     "[AGENT] Completed actions:",
     completedActions.length
 );
-
 
         console.log(
             "Total planner latency:",
             totalPlannerLatency.toFixed(2),
             "ms"
         );
-
 
         console.log(
             "Total network latency:",
@@ -3074,11 +2520,6 @@ console.log(
         );
     }
 }
-
-
-// ============================================================
-// HTML ESCAPE
-// ============================================================
 
 function escapeHTML(
     value
@@ -3109,11 +2550,6 @@ function escapeHTML(
         );
 }
 
-
-// ============================================================
-// QUICK TASK BUTTONS
-// ============================================================
-
 const quickTasks = {
 
     "Full Name":
@@ -3132,7 +2568,6 @@ const quickTasks = {
         "Scroll down"
 };
 
-
 Object.entries(
     quickTasks
 )
@@ -3143,7 +2578,6 @@ Object.entries(
             document.querySelectorAll(
                 "button"
             );
-
 
         buttons.forEach(
             button => {
@@ -3175,11 +2609,6 @@ Object.entries(
     }
 );
 
-
-// ============================================================
-// ENTER KEY
-// ============================================================
-
 if (taskInput) {
 
     taskInput.addEventListener(
@@ -3199,11 +2628,6 @@ if (taskInput) {
     );
 }
 
-
-// ============================================================
-// MAIN BUTTON
-// ============================================================
-
 if (captureButton) {
 
     captureButton.addEventListener(
@@ -3212,31 +2636,22 @@ if (captureButton) {
     );
 }
 
-
-// ============================================================
-// INITIAL LOG
-// ============================================================
-
 console.log(
     " Private Agent popup listeners attached"
 );
-
 
 console.log(
     " Multi-step private agent enabled"
 );
 
-
 console.log(
     " Screenshot-only PII masking enabled"
 );
 
-
 console.log(
-    " Compound TYPE → SUBMIT flow enabled"
+    " Ordered CLICK → TYPE → SUBMIT flow enabled"
 );
 
-
 console.log(
-    " Compound SCROLL → CONTINUE flow enabled"
+    " Ordered SCROLL → CLICK flow enabled"
 );
