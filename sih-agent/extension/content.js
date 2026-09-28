@@ -2885,7 +2885,339 @@ function getFaceImageRegions(
 
     return regions;
 }
+// ============================================================
+// PHASE 5 — ADVANCED REDACTION
+// 5.3 OVERLAPPING REGION UNION
+// ============================================================
+//
+// Merges overlapping/touching canvas regions into one region.
+// This prevents separate redaction rectangles from leaving
+// exposed pixels between overlapping PII detections.
+//
+// Example:
+//
+// FACE + NAME
+//    ↓
+// one protected rectangle
+// ============================================================
 
+function mergeCanvasRegions(regions) {
+
+    if (!Array.isArray(regions) || regions.length === 0) {
+        return [];
+    }
+
+    const merged = [];
+
+    for (const region of regions) {
+
+        if (
+            !region ||
+            !Number.isFinite(region.x) ||
+            !Number.isFinite(region.y) ||
+            !Number.isFinite(region.width) ||
+            !Number.isFinite(region.height) ||
+            region.width <= 0 ||
+            region.height <= 0
+        ) {
+            continue;
+        }
+
+        let current = {
+            x: region.x,
+            y: region.y,
+            width: region.width,
+            height: region.height
+        };
+
+        let mergedSomething = true;
+
+        while (mergedSomething) {
+
+            mergedSomething = false;
+
+            for (let i = merged.length - 1; i >= 0; i--) {
+
+                const existing = merged[i];
+
+                const currentRight =
+                    current.x + current.width;
+
+                const currentBottom =
+                    current.y + current.height;
+
+                const existingRight =
+                    existing.x + existing.width;
+
+                const existingBottom =
+                    existing.y + existing.height;
+
+                // Small 1px tolerance handles rounding boundaries.
+                const overlaps =
+                    current.x <= existingRight + 1 &&
+                    currentRight >= existing.x - 1 &&
+                    current.y <= existingBottom + 1 &&
+                    currentBottom >= existing.y - 1;
+
+                if (!overlaps) {
+                    continue;
+                }
+
+                const left =
+                    Math.min(
+                        current.x,
+                        existing.x
+                    );
+
+                const top =
+                    Math.min(
+                        current.y,
+                        existing.y
+                    );
+
+                const right =
+                    Math.max(
+                        currentRight,
+                        existingRight
+                    );
+
+                const bottom =
+                    Math.max(
+                        currentBottom,
+                        existingBottom
+                    );
+
+                current = {
+                    x: left,
+                    y: top,
+                    width: Math.max(
+                        1,
+                        right - left
+                    ),
+                    height: Math.max(
+                        1,
+                        bottom - top
+                    )
+                };
+
+                merged.splice(i, 1);
+
+                mergedSomething = true;
+            }
+        }
+
+        merged.push(current);
+    }
+
+    return merged;
+}
+// ============================================================
+// PHASE 5.4 — SOURCE-AWARE VERIFICATION
+// ============================================================
+//
+// Keeps the detection source attached to the redaction region.
+//
+// Supported sources:
+//     dom
+//     ocr
+//     vision
+//     face
+//     fused
+//
+// FACE is normalized from "vision" to "face".
+// ============================================================
+
+function normalizeRedactionSource(source) {
+
+    const value =
+        String(source || "")
+            .trim()
+            .toLowerCase();
+
+    if (value === "vision") {
+        return "face";
+    }
+
+    if (
+        value === "dom" ||
+        value === "ocr" ||
+        value === "face" ||
+        value === "fused"
+    ) {
+        return value;
+    }
+
+    return "unknown";
+}
+
+
+function createSourceAwareRegion(
+    core,
+    paint,
+    detection
+) {
+
+    return {
+        core,
+        paint,
+
+        source:
+            normalizeRedactionSource(
+                detection?.source
+            ),
+
+        type:
+            String(
+                detection?.type || "UNKNOWN"
+            ),
+
+        confidence:
+            Number.isFinite(
+                Number(
+                    detection?.confidence
+                )
+            )
+                ? Number(
+                    detection.confidence
+                )
+                : 0
+    };
+}
+// ============================================================
+// SOURCE-AWARE PIXEL VERIFICATION
+// ============================================================
+//
+// Verification remains pixel-based.
+//
+// Source metadata does NOT weaken the privacy requirement.
+// Every source must satisfy the same redaction guarantee.
+//
+// A region fails if any pixel inside its protected core
+// remains visibly unredacted.
+// ============================================================
+
+function verifySourceAwareRegions(
+    context,
+    regions
+) {
+
+    const result = {
+        totalRegions: 0,
+        failedRegions: 0,
+
+        bySource: {
+            dom: {
+                regions: 0,
+                failed: 0
+            },
+
+            ocr: {
+                regions: 0,
+                failed: 0
+            },
+
+            face: {
+                regions: 0,
+                failed: 0
+            },
+
+            fused: {
+                regions: 0,
+                failed: 0
+            },
+
+            unknown: {
+                regions: 0,
+                failed: 0
+            }
+        }
+    };
+
+
+    if (
+        !context ||
+        !Array.isArray(regions)
+    ) {
+        return result;
+    }
+
+
+    for (const region of regions) {
+
+        if (
+            !region ||
+            !region.core
+        ) {
+            continue;
+        }
+
+
+        result.totalRegions++;
+
+
+        const source =
+            normalizeRedactionSource(
+                region.source
+            );
+
+
+        const sourceBucket =
+            result.bySource[source] ||
+            result.bySource.unknown;
+
+
+        sourceBucket.regions++;
+
+
+        let failed = false;
+
+
+        try {
+
+            const failures =
+                countUnredactedRegions(
+                    context,
+                    [
+                        region.core
+                    ]
+                );
+
+
+            failed =
+                failures > 0;
+
+        } catch (error) {
+
+            console.error(
+                "[VERIFY] Region verification error:",
+                error?.message || error
+            );
+
+            // Fail closed.
+            failed = true;
+        }
+
+
+        if (failed) {
+
+            result.failedRegions++;
+
+            sourceBucket.failed++;
+
+            console.error(
+                "[VERIFY] FAILED:",
+                `source=${source}`,
+                `type=${region.type}`,
+                `confidence=${Number(
+                    region.confidence || 0
+                ).toFixed(4)}`
+            );
+        }
+    }
+
+
+    return result;
+}
 // ============================================================
 // SCREENSHOT SANITIZATION
 // PHASE 2.5 â€” ADVANCED REDACTION + VERIFICATION
@@ -3077,6 +3409,7 @@ function sanitizeScreenshot(
                             // ====================================================
                             // REGION CLASSIFICATION
                             // ====================================================
+                            const sourceAwareRegions = [];
 
                             const paintRegions = [];
 
@@ -3130,13 +3463,28 @@ function sanitizeScreenshot(
                                         return;
                                     }
 
-                                    paintRegions.push(
-                                        regions.paint
-                                    );
+                                   const sourceAwareRegion =
+    createSourceAwareRegion(
+        regions.core,
+        regions.paint,
+        {
+            source: "vision",
+            type: "FACE",
+            confidence: 1
+        }
+    );
 
-                                    coreRegions.push(
-                                        regions.core
-                                    );
+sourceAwareRegions.push(
+    sourceAwareRegion
+);
+
+paintRegions.push(
+    regions.paint
+);
+
+coreRegions.push(
+    regions.core
+);
                                 }
                             );
 
@@ -3243,51 +3591,169 @@ function sanitizeScreenshot(
                                     }
 
 
-                                    paintRegions.push(
-                                        regions.paint
-                                    );
+                                    const sourceAwareRegion =
+    createSourceAwareRegion(
+        regions.core,
+        regions.paint,
+        detection
+    );
 
-                                    coreRegions.push(
-                                        regions.core
-                                    );
+sourceAwareRegions.push(
+    sourceAwareRegion
+);
+
+paintRegions.push(
+    regions.paint
+);
+
+coreRegions.push(
+    regions.core
+);
                                 }
                             );
 
 
                             benchmarkMetrics.inCaptureRegions =
-                                coreRegions.length;
+    coreRegions.length;
 
-                            benchmarkMetrics.outOfViewRegions =
-                                outOfViewCount;
+benchmarkMetrics.outOfViewRegions =
+    outOfViewCount;
 
-                            benchmarkMetrics.invalidRegions =
-                                invalidCount;
-
-
-                            // ====================================================
-                            // REDACT
-                            // ====================================================
-
-                            context.fillStyle =
-                                "#000000";
+benchmarkMetrics.invalidRegions =
+    invalidCount;
 
 
-                            paintRegions.forEach(
-                                region => {
-
-                                    context.fillRect(
-                                        region.x,
-                                        region.y,
-                                        region.width,
-                                        region.height
-                                    );
-
-                                }
-                            );
+// ====================================================
+// PHASE 5.1 — UNIFIED REDACTION
+// ====================================================
+//
+// DOM + OCR + FACE detections have already passed
+// through the Phase 4 fusion engine.
+//
+// At this point every detection is treated as one
+// unified privacy region.
+// ====================================================
 
 
-                            benchmarkMetrics.redactedRegions =
-                                paintRegions.length;
+// ====================================================
+// PHASE 5.2 — PADDING
+// ====================================================
+//
+// Padding was already applied by toCanvasRegions().
+// paintRegions therefore contain the protected regions
+// including the configured safety margin.
+// ====================================================
+
+
+// ====================================================
+// PHASE 5.3 — OVERLAP UNION
+// ====================================================
+//
+// Merge overlapping/touching padded regions before
+// painting the canvas.
+//
+// This guarantees that:
+//
+// FACE + NAME
+//
+// becomes one continuous protected region.
+// ====================================================
+// ============================================================
+// SOURCE SUMMARY
+// ============================================================
+
+const sourceSummary = {
+    dom: 0,
+    ocr: 0,
+    face: 0,
+    fused: 0,
+    unknown: 0
+};
+
+
+sourceAwareRegions.forEach(
+    region => {
+
+        const source =
+            normalizeRedactionSource(
+                region.source
+            );
+
+        if (
+            Object.prototype.hasOwnProperty.call(
+                sourceSummary,
+                source
+            )
+        ) {
+            sourceSummary[source]++;
+        } else {
+            sourceSummary.unknown++;
+        }
+    }
+);
+
+
+console.log(
+    "[VERIFY] Source regions:",
+    `DOM=${sourceSummary.dom}`,
+    `OCR=${sourceSummary.ocr}`,
+    `FACE=${sourceSummary.face}`,
+    `FUSED=${sourceSummary.fused}`,
+    `UNKNOWN=${sourceSummary.unknown}`
+);
+const mergedPaintRegions =
+    mergeCanvasRegions(
+        paintRegions
+    );
+
+
+// ====================================================
+// MATCH CORE REGIONS TO THE SAME PROTECTION SPACE
+// ====================================================
+//
+// Verification must cover the complete protected
+// region, not only the individual source rectangles.
+//
+// Therefore the core regions are also merged.
+// ====================================================
+
+const mergedCoreRegions =
+    mergeCanvasRegions(
+        coreRegions
+    );
+
+
+console.log(
+    "[REDACTION] Region union:",
+    `input=${paintRegions.length}`,
+    `output=${mergedPaintRegions.length}`
+);
+
+
+// ====================================================
+// REDACT
+// ====================================================
+
+context.fillStyle =
+    "#000000";
+
+
+mergedPaintRegions.forEach(
+    region => {
+
+        context.fillRect(
+            region.x,
+            region.y,
+            region.width,
+            region.height
+        );
+
+    }
+);
+
+
+benchmarkMetrics.redactedRegions =
+    mergedPaintRegions.length;
 
 
                             // ====================================================
@@ -3307,12 +3773,24 @@ function sanitizeScreenshot(
                                 performance.now();
 
 
-                            const pixelFailures =
-                                countUnredactedRegions(
-                                    context,
-                                    coreRegions
-                                );
+                            const verificationResult =
+    verifySourceAwareRegions(
+        context,
+        sourceAwareRegions
+    );
 
+const pixelFailures =
+    verificationResult.failedRegions;
+console.log(
+    "[VERIFY] Source-aware verification:",
+    `regions=${verificationResult.totalRegions}`,
+    `failed=${verificationResult.failedRegions}`,
+    `DOM=${verificationResult.bySource.dom.regions}/${verificationResult.bySource.dom.failed}`,
+    `OCR=${verificationResult.bySource.ocr.regions}/${verificationResult.bySource.ocr.failed}`,
+    `FACE=${verificationResult.bySource.face.regions}/${verificationResult.bySource.face.failed}`,
+    `FUSED=${verificationResult.bySource.fused.regions}/${verificationResult.bySource.fused.failed}`,
+    `UNKNOWN=${verificationResult.bySource.unknown.regions}/${verificationResult.bySource.unknown.failed}`
+);
 
                             // Invalid regions are privacy failures.
                             const failedRegions =
@@ -3326,8 +3804,8 @@ function sanitizeScreenshot(
 
 
                             benchmarkMetrics.verificationRegions =
-                                coreRegions.length +
-                                invalidCount;
+                            mergedCoreRegions.length +
+                            invalidCount;
 
 
                             benchmarkMetrics.verificationFailedRegions =
@@ -6181,7 +6659,90 @@ chrome.runtime.onMessage.addListener(
 
                 .then(
                     function (ocrResult) {
+                       // ============================================================
+// PHASE 5.5 — STRICT FAIL-CLOSED TRANSMISSION
+// ============================================================
+//
+// Transmission is allowed ONLY when:
+//
+// 1. Sanitization completed successfully.
+// 2. Source-aware verification passed.
+// 3. Privacy gate passed.
+// 4. A sanitized image was actually produced.
+// 5. The image is a valid encoded image.
+//
+// NEVER transmit the original screenshot here.
+// ============================================================
 
+if (
+    benchmarkMetrics.privacyGatePassed !== true
+) {
+
+    console.error(
+        "[TRANSMISSION] BLOCKED: privacy gate failed."
+    );
+
+    throw new Error(
+        "Privacy pipeline blocked: privacy gate did not pass."
+    );
+}
+
+
+if (
+    benchmarkMetrics.verificationPassed !== true
+) {
+
+    console.error(
+        "[TRANSMISSION] BLOCKED: verification failed."
+    );
+
+    throw new Error(
+        "Privacy pipeline blocked: verification did not pass."
+    );
+}
+
+
+if (
+    typeof sanitizedImage !== "string" ||
+    sanitizedImage.length === 0
+) {
+
+    console.error(
+        "[TRANSMISSION] BLOCKED: sanitized image missing."
+    );
+
+    throw new Error(
+        "Privacy pipeline blocked: sanitized image missing."
+    );
+}
+
+
+if (
+    !sanitizedImage.startsWith(
+        "data:image/"
+    )
+) {
+
+    console.error(
+        "[TRANSMISSION] BLOCKED: invalid sanitized image format."
+    );
+
+    throw new Error(
+        "Privacy pipeline blocked: invalid sanitized image."
+    );
+}
+
+
+console.log(
+    "[TRANSMISSION] Privacy gate verified.",
+    `format=${benchmarkMetrics.screenshotFormat}`,
+    `size=${benchmarkMetrics.screenshotAfterBytes} bytes`
+);
+
+
+console.log(
+    "[TRANSMISSION] Sanitized image approved for transmission."
+);
                         // ------------------------------
                         // IMPORTANT PRIVACY RULE
                         // ------------------------------
@@ -6274,55 +6835,43 @@ chrome.runtime.onMessage.addListener(
                         ocrBenchmarkInProgress = false;
 
 
-                        sendResponse({
+                       sendResponse({
 
-                            success:
-                                true,
+    success: true,
 
-                            ocr: {
+    sanitizedImage,
 
-                                latencyMs:
-                                    Number(
-                                        ocrResult.latencyMs
-                                    ) || 0,
+    dom_elements:
+        collectSafeDOM(),
 
-                                totalWords:
-                                    Number(
-                                        ocrResult.wordCount
-                                    ) || 0,
+    viewport: {
+        width:
+            window.innerWidth,
 
-                                piiDetections:
-                                    safeDetections.length,
+        height:
+            window.innerHeight,
 
-                                acceptedPII,
+        devicePixelRatio:
+            window.devicePixelRatio,
 
-                                rejectedPII,
+        scrollX:
+            window.scrollX,
 
-                                averageConfidence:
-                                    Number(
-                                        metrics.lastAverageConfidence
-                                    ) || 0,
+        scrollY:
+            window.scrollY,
 
-                                minConfidence:
-                                    Number(
-                                        metrics.lastMinConfidence
-                                    ) || 0,
+        documentWidth:
+            document.documentElement
+                ? document.documentElement.scrollWidth
+                : window.innerWidth,
 
-                                detections:
-                                    safeDetections
-                            },
-
-                            // Also surfaced at the top level so
-                            // background.js's existing benchmark
-                            // sanitizer (which reads
-                            // response.detections / response.report)
-                            // keeps working unchanged.
-                            detections:
-                                safeDetections,
-
-                            report
-                        });
-                    }
+        documentHeight:
+            document.documentElement
+                ? document.documentElement.scrollHeight
+                : window.innerHeight
+    }
+});
+}
                 )
 
                 .catch(
