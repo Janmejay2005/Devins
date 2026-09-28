@@ -105,7 +105,7 @@ const REDACTION_PADDING = 3;
 
 const FACE_CONFIDENCE_THRESHOLD = 0.60;
 
-const FACE_DETECTION_TIMEOUT_MS = 10000;
+const FACE_DETECTION_TIMEOUT_MS = 30000;
 const SCREENSHOT_PIPELINE_TIMEOUT_MS = 30000;
 
 function createEmptyBenchmarkMetrics() {
@@ -6947,45 +6947,34 @@ if (
                 "function"
         ) {
 
-            const fusionInput = [
-                ...domDetections,
-                ...ocrDetections,
-                ...visionDetections
-            ];
+    const fusionResult =
+    window.SIHPiiFusion.fuse(
+        fusedDetections
+    );
 
-            const fusionResult =
-                window.SIHPiiFusion.fuse([
-                    ...domDetections,
-                    ...ocrDetections,
-                    ...visionDetections
-                ]);
+fusedDetections =
+    Array.isArray(fusionResult?.detections)
+        ? fusionResult.detections
+        : [];
 
-            fusedDetections =
-                Array.isArray(
-                    fusionResult?.detections
-                )
-                    ? fusionResult.detections
-                    : fusedDetections;
+const fusionStats =
+    fusionResult?.stats || {};
 
-            benchmarkMetrics.fusionLatencyMs =
-                performance.now() -
-                fusionStart;
-
-            benchmarkMetrics.fusionOutputRegions =
-                fusedDetections.length;
-
-
-            console.log(
-                "[FUSION] Unified PII set:",
-                `input=${fusionResult?.stats?.input ?? fusionInput.length}`,
-                `output=${fusionResult?.stats?.output ?? fusedDetections.length}`,
-                `merged=${fusionResult?.stats?.merged ?? 0}`,
-                `DOM=${fusionResult?.stats?.dom ?? domDetections.length}`,
-                `OCR=${fusionResult?.stats?.ocr ?? ocrDetections.length}`,
-                `latency=${Number(
-                    fusionResult?.latencyMs || 0
-                ).toFixed(2)} ms`
-            );
+console.log(
+    "[FUSION] Unified PII set:",
+    `input=${fusionStats.input ?? (domDetections.length + ocrDetections.length + faceDetections.length)}`,
+    `output=${fusionStats.output ?? fusedDetections.length}`,
+    `merged=${fusionStats.merged ?? 0}`,
+    `DOM=${fusionStats.dom ?? 0}`,
+    `OCR=${fusionStats.ocr ?? 0}`,
+    `FACE=${fusionStats.face ?? 0}`,
+    `FUSED=${fusionStats.fused ?? 0}`,
+    `conflicts=${fusionStats.conflicts ?? 0}`,
+    `evidence=${fusionStats.evidence ?? fusedDetections.length}`,
+    `latency=${Number(
+        fusionStats.latencyMs ?? 0
+    ).toFixed(2)} ms`
+);
 
         } else {
 
