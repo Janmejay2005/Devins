@@ -67,7 +67,7 @@ if (!taskInput) {
 }
 
 const API_URL =
-    "http://127.0.0.1:8000/analyze";
+    "https://devins.onrender.com/analyze";
 
 const MAX_AGENT_STEPS = 4;
 
