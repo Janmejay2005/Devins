@@ -16,10 +16,29 @@
     "https://devins.onrender.com/*"
   ],
 
-  "background": {
-    "scripts": ["background.js"],
+ "background": {
+    "scripts": [
+        "background.js"
+    ],
     "service_worker": "background.js"
-  },
+},
+
+ 
+"sandbox": {
+    "pages": [
+        "sandbox.html"
+    ]
+},
+
+"content_security_policy": {
+    "extension_pages":
+        "script-src 'self' 'wasm-unsafe-eval'",
+
+    "sandbox":
+        "sandbox allow-scripts; script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval'"
+},
+
+
 
   "browser_specific_settings": {
     "gecko": {

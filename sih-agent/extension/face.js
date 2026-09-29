@@ -140,7 +140,88 @@ const TILE_OVERLAP = 0.20;
         return path;
     }
 
+// ========================================================
+// FIREFOX CONTENT-SCRIPT BRIDGE
+// ========================================================
+//
+// Firefox content scripts cannot reliably initialize
+// TensorFlow.js + BlazeFace in the isolated page context.
+//
+// Chrome keeps the existing local pipeline.
+// Firefox content scripts delegate face inference to the
+// extension background context.
+//
+// ========================================================
 
+// ========================================================
+// REAL FIREFOX CONTENT-SCRIPT DETECTION
+// Chrome / Chromium must NEVER enter the Firefox bridge.
+// ========================================================
+
+const USER_AGENT =
+    typeof navigator !== "undefined"
+        ? navigator.userAgent
+        : "";
+
+const IS_FIREFOX_BROWSER =
+    /Firefox\/\d+/i.test(USER_AGENT) &&
+    !/Chrome\/\d+|Chromium\/\d+|Edg\/\d+|OPR\/\d+/i.test(
+        USER_AGENT
+    );
+
+const DEVINS_IS_FIREFOX_CONTENT=
+    IS_FIREFOX_BROWSER &&
+    typeof window !== "undefined" &&
+    window.location &&
+    window.location.protocol !== "moz-extension:" &&
+    window.location.protocol !== "chrome-extension:" &&
+    typeof browser !== "undefined" &&
+    browser.runtime &&
+    typeof browser.runtime.sendMessage === "function";
+
+
+function getScreenshotForFirefoxBridge(context) {
+
+    if (
+        !context ||
+        typeof context !== "object"
+    ) {
+        return "";
+    }
+
+
+    const candidates = [
+
+        context.screenshot,
+
+        context.screenshotDataUrl,
+
+        context.screenshot_data_url,
+
+        context.dataURL,
+
+        context.dataUrl
+
+    ];
+
+
+    for (
+        const value of candidates
+    ) {
+
+        if (
+            typeof value === "string" &&
+            value.startsWith("data:image/")
+        ) {
+
+            return value;
+
+        }
+    }
+
+
+    return "";
+}
     // ========================================================
     // LOCAL MODEL PATHS
     // ========================================================
@@ -1645,18 +1726,158 @@ const TILE_OVERLAP = 0.20;
     // ========================================================
 
     async function detect(
-        context = {}
+    context = {}
+) {
+
+    const start =
+        performance.now();
+
+
+    // ========================================================
+    // FIREFOX CONTENT-SCRIPT BRIDGE
+    // ========================================================
+
+    if (
+        DEVINS_IS_FIREFOX_CONTENT
     ) {
-
-        const start =
-            performance.now();
-
 
         metrics.detectionRuns++;
 
-        metrics.lastRawPredictionCount = 0;
+        metrics.lastRawPredictionCount =
+            0;
 
-        metrics.lastAcceptedFaceCount = 0;
+        metrics.lastAcceptedFaceCount =
+            0;
+
+
+        const screenshot =
+            getScreenshotForFirefoxBridge(
+                context
+            );
+
+
+        if (
+            !screenshot
+        ) {
+
+            const error =
+                new Error(
+                    "Firefox face bridge received no valid screenshot."
+                );
+
+            metrics.errors++;
+
+
+            console.error(
+                "[FACE] Firefox bridge input failed:",
+                error.message
+            );
+
+
+            throw error;
+        }
+
+
+        console.log(
+            "[FACE] Firefox bridge: delegating inference to background."
+        );
+
+
+        try {
+
+            const response =
+                await browser.runtime.sendMessage({
+
+                    type:
+                        "FIREFOX_FACE_DETECT",
+
+                    screenshot:
+                        screenshot
+                });
+
+
+            if (
+                !response ||
+                response.success !== true
+            ) {
+
+                throw new Error(
+                    response?.error ||
+                    "Firefox background face detection failed."
+                );
+            }
+
+
+            const detections =
+                Array.isArray(
+                    response.detections
+                )
+                    ? response.detections
+                    : [];
+
+
+            metrics.lastAcceptedFaceCount =
+                detections.length;
+
+            metrics.acceptedPredictions +=
+                detections.length;
+
+            metrics.detectedFaces +=
+                detections.length;
+
+
+            metrics.confidenceSamples.push(
+                ...detections
+                    .map(
+                        detection =>
+                            Number(
+                                detection?.confidence
+                            )
+                    )
+                    .filter(
+                        Number.isFinite
+                    )
+            );
+
+
+            console.log(
+                "[FACE] Firefox bridge: detections=",
+                detections.length
+            );
+
+
+            return detections;
+
+
+        } catch (error) {
+
+            metrics.errors++;
+
+
+            console.error(
+                "[FACE] Firefox bridge failed:",
+                error?.message ||
+                error
+            );
+
+
+            throw error;
+
+        }
+    }
+
+
+    // ========================================================
+    // EXISTING CHROME / LOCAL PIPELINE
+    // ========================================================
+
+    metrics.detectionRuns++;
+
+    metrics.lastRawPredictionCount =0;
+
+    metrics.lastAcceptedFaceCount = 0;
+
+        
 
 
         try {

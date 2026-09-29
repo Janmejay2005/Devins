@@ -355,6 +355,115 @@ function buildAgentTaskSteps(
     ];
 }
 
+// ============================================================
+// RUNTIME MESSAGE WITH TIMEOUT
+// Prevents the agent button from spinning forever.
+// ============================================================
+
+function sendRuntimeMessage(
+    message,
+    timeoutMs = 60000
+) {
+
+    return new Promise(
+        function (
+            resolve,
+            reject
+        ) {
+
+            let finished = false;
+
+
+            const timeoutId =
+                setTimeout(
+                    function () {
+
+                        if (finished) {
+                            return;
+                        }
+
+
+                        finished = true;
+
+
+                        reject(
+                            new Error(
+                                `Extension request timed out after ${timeoutMs / 1000}s.`
+                            )
+                        );
+
+                    },
+                    timeoutMs
+                );
+
+
+            try {
+
+                chrome.runtime.sendMessage(
+                    message,
+                    function (response) {
+
+                        if (finished) {
+                            return;
+                        }
+
+
+                        finished = true;
+
+
+                        clearTimeout(
+                            timeoutId
+                        );
+
+
+                        const runtimeError =
+                            chrome.runtime.lastError;
+
+
+                        if (runtimeError) {
+
+                            reject(
+                                new Error(
+                                    runtimeError.message ||
+                                    "Extension runtime request failed."
+                                )
+                            );
+
+                            return;
+                        }
+
+
+                        resolve(
+                            response
+                        );
+
+                    }
+                );
+
+            } catch (error) {
+
+                if (finished) {
+                    return;
+                }
+
+
+                finished = true;
+
+
+                clearTimeout(
+                    timeoutId
+                );
+
+
+                reject(
+                    error
+                );
+            }
+
+        }
+    );
+}
+
 async function captureSanitizedScreen() {
 
     console.log(
@@ -362,11 +471,13 @@ async function captureSanitizedScreen() {
     );
 
     const response =
-        await chrome.runtime.sendMessage({
-
-            type:
-                "CAPTURE_AND_SANITIZE"
-        });
+        await sendRuntimeMessage(
+            {
+                type:
+                    "CAPTURE_AND_SANITIZE"
+            },
+            60000
+        );
 
     console.log(
     "[PRIVACY] Capture response received:",
@@ -462,14 +573,16 @@ async function executeAction(
     }
 
     const response =
-        await chrome.runtime.sendMessage({
+        await sendRuntimeMessage(
+            {
+                type:
+                    "EXECUTE_BROWSER_ACTION",
 
-            type:
-                "EXECUTE_BROWSER_ACTION",
-
-            action:
-                action
-        });
+                action:
+                    action
+            },
+            30000
+        );
 
     console.log(
     "[ACTION] Execution response:",

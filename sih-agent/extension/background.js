@@ -1,45 +1,12 @@
 // ============================================================
-// SIH PRIVACY BROWSER AGENT
+// DEVINS PRIVACY BROWSER AGENT
 // background.js
 // ============================================================
-//
-// SECURITY BOUNDARY
-//
-// This service worker sits between:
-//     AI planner
-//         |
-//         v
-//     background.js
-//         |
-//         v
-//     content.js
-//         |
-//         v
-//     browser
-//
-// The planner is treated as UNTRUSTED input.
-//
-// background.js therefore:
-//
-// - validates planner actions
-// - removes unnecessary planner fields
-// - never logs TYPE values
-// - never forwards unsupported actions
-// - validates content-script responses
-// - applies a second PII metadata boundary
-// - strips sensitive URL components
-// - keeps raw screenshots inside the extension
-//
-// ============================================================
 
-
-console.log(
-    "[SIH] Privacy Agent background service started"
-);
-
+console.log("[SIH] Privacy Agent background service started");
 
 // ============================================================
-// CONSTANTS
+// CONFIG
 // ============================================================
 
 const ALLOWED_ACTIONS = new Set([
@@ -50,28 +17,16 @@ const ALLOWED_ACTIONS = new Set([
     "none"
 ]);
 
-
-// Maximum scroll amount allowed in one planner action.
 const MAX_SCROLL_AMOUNT = 1500;
-
-
-// Maximum wait requested by one planner action.
+const MIN_WAIT_MS = 100;
 const MAX_WAIT_MS = 5000;
 
-
-// Minimum wait so a wait action cannot become an
-// accidental zero-duration operation.
-const MIN_WAIT_MS = 100;
-
-
-// Maximum time allowed for an OCR benchmark round trip
-// (background -> content.js -> ocr.js -> background).
+const PREPARE_CAPTURE_TIMEOUT_MS = 10000;
+const SANITIZE_CAPTURE_TIMEOUT_MS = 90000;
+const PERCEPTION_TIMEOUT_MS = 10000;
+const ACTION_TIMEOUT_MS = 15000;
 const OCR_BENCHMARK_TIMEOUT_MS = 15000;
 
-
-// Allowed PII types the OCR benchmark is permitted to
-// request/report on. Keeps the benchmark route aligned
-// with what ocr.js actually detects (no name detection).
 const ALLOWED_BENCHMARK_TYPES = new Set([
     "EMAIL",
     "PHONE",
@@ -81,73 +36,447 @@ const ALLOWED_BENCHMARK_TYPES = new Set([
     "PASSWORD"
 ]);
 
+// Firefox background pages have window/document.
+// Chrome MV3 service workers do not.
+const IS_EXTENSION_DOCUMENT_CONTEXT =
+    typeof window !== "undefined" &&
+    typeof document !== "undefined";
+
+const USER_AGENT =
+    typeof navigator !== "undefined"
+        ? navigator.userAgent || ""
+        : "";
+
+const IS_FIREFOX_BROWSER =
+    /Firefox\/\d+/i.test(USER_AGENT) &&
+    !/Chrome\/\d+|Chromium\/\d+|Edg\/\d+|OPR\/\d+/i.test(
+        USER_AGENT
+    );
 
 // ============================================================
-// MESSAGE SENDER VALIDATION
-// ============================================================
-//
-// Only messages originating from this extension are accepted.
-//
-// This prevents an unexpected extension context from attempting
-// to invoke browser actions through this service worker.
-//
+// HELPERS
 // ============================================================
 
 function isTrustedExtensionSender(sender) {
-
-    if (
-        !sender ||
-        !sender.id
-    ) {
-        return false;
-    }
-
-    return (
+    return Boolean(
+        sender &&
+        sender.id &&
+        typeof chrome !== "undefined" &&
+        chrome.runtime &&
         sender.id === chrome.runtime.id
     );
 }
 
+function createRequestId(prefix = "req") {
+    try {
+        if (
+            typeof crypto !== "undefined" &&
+            typeof crypto.randomUUID === "function"
+        ) {
+            return `${prefix}_${crypto.randomUUID()}`;
+        }
+    } catch (_) {}
+
+    return (
+        prefix +
+        "_" +
+        Date.now() +
+        "_" +
+        Math.random()
+            .toString(36)
+            .slice(2)
+    );
+}
+
+function withTimeout(
+    promise,
+    timeoutMs,
+    timeoutMessage
+) {
+    let timeoutId = null;
+
+    const timeoutPromise =
+        new Promise(
+            (_, reject) => {
+                timeoutId = setTimeout(
+                    () => {
+                        reject(
+                            new Error(
+                                timeoutMessage
+                            )
+                        );
+                    },
+                    timeoutMs
+                );
+            }
+        );
+
+    return Promise.race([
+        promise.finally(
+            () => {
+                if (timeoutId !== null) {
+                    clearTimeout(timeoutId);
+                }
+            }
+        ),
+        timeoutPromise
+    ]);
+}
+
+async function sendTabMessage(
+    tabId,
+    message,
+    timeoutMs,
+    operationName
+) {
+    if (!Number.isInteger(tabId)) {
+        throw new Error(
+            `${operationName}: invalid tab ID.`
+        );
+    }
+
+    try {
+        return await withTimeout(
+            chrome.tabs.sendMessage(
+                tabId,
+                message
+            ),
+            timeoutMs,
+            `${operationName} timed out.`
+        );
+    } catch (error) {
+        throw new Error(
+            `${operationName} failed: ` +
+            (
+                error?.message ||
+                "Unknown error"
+            )
+        );
+    }
+}
 
 // ============================================================
-// SANITIZE DETECTION METADATA
+// FIREFOX FACE SANDBOX
 // ============================================================
-//
-// Defense-in-depth.
-//
-// content.js already removes PII values from serializable
-// detection metadata.
-//
-// background.js performs the same boundary again.
-//
-// IMPORTANT:
-//
-// detection.value
-// detection.text
-// detection.rawValue
-//
-// and similar fields are NEVER copied.
-//
-// Only non-sensitive classification + geometry is retained.
-//
+
+let firefoxFaceFrame = null;
+let firefoxFaceReady = null;
+
+const firefoxFacePending =
+    new Map();
+
+function createFirefoxFaceSandbox() {
+    if (!IS_FIREFOX_BROWSER) {
+        return Promise.reject(
+            new Error(
+                "Firefox face sandbox requested outside Firefox."
+            )
+        );
+    }
+
+    if (!IS_EXTENSION_DOCUMENT_CONTEXT) {
+        return Promise.reject(
+            new Error(
+                "Firefox face sandbox requires an extension document context."
+            )
+        );
+    }
+
+    if (firefoxFaceFrame) {
+        return Promise.resolve(
+            firefoxFaceFrame
+        );
+    }
+
+    if (firefoxFaceReady) {
+        return firefoxFaceReady;
+    }
+
+    firefoxFaceReady =
+        new Promise(
+            function (
+                resolve,
+                reject
+            ) {
+                const iframe =
+                    document.createElement(
+                        "iframe"
+                    );
+
+                iframe.style.display =
+                    "none";
+
+                iframe.src =
+                    chrome.runtime.getURL(
+                        "sandbox.html"
+                    );
+
+                const cleanup = () => {
+                    if (
+                        iframe &&
+                        iframe.parentNode
+                    ) {
+                        iframe.parentNode.removeChild(
+                            iframe
+                        );
+                    }
+                };
+
+                const timeoutId =
+                    setTimeout(
+                        () => {
+                            window.removeEventListener(
+                                "message",
+                                onReady
+                            );
+
+                            firefoxFaceReady =
+                                null;
+
+                            cleanup();
+
+                            reject(
+                                new Error(
+                                    "Firefox face sandbox initialization timed out."
+                                )
+                            );
+                        },
+                        20000
+                    );
+
+                function onReady(event) {
+                    if (
+                        event.source !==
+                        iframe.contentWindow
+                    ) {
+                        return;
+                    }
+
+                    const message =
+                        event.data;
+
+                    if (
+                        !message ||
+                        message.type !==
+                        "DEVINS_FACE_SANDBOX_READY"
+                    ) {
+                        return;
+                    }
+
+                    clearTimeout(
+                        timeoutId
+                    );
+
+                    window.removeEventListener(
+                        "message",
+                        onReady
+                    );
+
+                    firefoxFaceFrame =
+                        iframe;
+
+                    console.log(
+                        "[FACE-BG] Firefox face sandbox ready."
+                    );
+
+                    resolve(
+                        iframe
+                    );
+                }
+
+                window.addEventListener(
+                    "message",
+                    onReady
+                );
+
+                document.documentElement.appendChild(
+                    iframe
+                );
+            }
+        );
+
+    return firefoxFaceReady;
+}
+
+// This listener exists only inside Firefox's extension document context.
+// Chrome MV3 service workers never execute this block.
+if (
+    IS_FIREFOX_BROWSER &&
+    IS_EXTENSION_DOCUMENT_CONTEXT
+) {
+    window.addEventListener(
+        "message",
+        function (event) {
+            if (
+                !firefoxFaceFrame ||
+                event.source !==
+                firefoxFaceFrame.contentWindow
+            ) {
+                return;
+            }
+
+            const message =
+                event.data;
+
+            if (
+                !message ||
+                message.type !==
+                "DEVINS_FACE_RESULT"
+            ) {
+                return;
+            }
+
+            const requestId =
+                message.requestId;
+
+            const pending =
+                firefoxFacePending.get(
+                    requestId
+                );
+
+            if (!pending) {
+                return;
+            }
+
+            firefoxFacePending.delete(
+                requestId
+            );
+
+            clearTimeout(
+                pending.timeoutId
+            );
+
+            if (
+                message.success !== true
+            ) {
+                pending.reject(
+                    new Error(
+                        message.error ||
+                        "Firefox face sandbox failed."
+                    )
+                );
+
+                return;
+            }
+
+            pending.resolve(
+                Array.isArray(
+                    message.detections
+                )
+                    ? message.detections
+                    : []
+            );
+        }
+    );
+}
+
+async function runFirefoxFaceDetection(
+    screenshot
+) {
+    if (!IS_FIREFOX_BROWSER) {
+        throw new Error(
+            "Firefox face detection is unavailable in this browser."
+        );
+    }
+
+    if (!IS_EXTENSION_DOCUMENT_CONTEXT) {
+        throw new Error(
+            "Firefox face detection requires the extension document context."
+        );
+    }
+
+    if (
+        typeof screenshot !== "string" ||
+        !screenshot.startsWith(
+            "data:image/"
+        )
+    ) {
+        throw new Error(
+            "Invalid screenshot supplied to Firefox face sandbox."
+        );
+    }
+
+    console.log(
+        "[FACE-BG] Starting Firefox sandbox face detection."
+    );
+
+    const iframe =
+        await createFirefoxFaceSandbox();
+
+    const requestId =
+        createRequestId("face");
+
+    return new Promise(
+        function (
+            resolve,
+            reject
+        ) {
+            const timeoutId =
+                setTimeout(
+                    () => {
+                        firefoxFacePending.delete(
+                            requestId
+                        );
+
+                        reject(
+                            new Error(
+                                "Firefox face sandbox detection timed out."
+                            )
+                        );
+                    },
+                    45000
+                );
+
+            firefoxFacePending.set(
+                requestId,
+                {
+                    resolve,
+                    reject,
+                    timeoutId
+                }
+            );
+
+            try {
+                iframe.contentWindow.postMessage(
+                    {
+                        type:
+                            "DEVINS_FACE_REQUEST",
+                        requestId,
+                        screenshot
+                    },
+                    "*"
+                );
+            } catch (error) {
+                firefoxFacePending.delete(
+                    requestId
+                );
+
+                clearTimeout(
+                    timeoutId
+                );
+
+                reject(
+                    error
+                );
+            }
+        }
+    );
+}
+
+// ============================================================
+// PRIVACY METADATA
 // ============================================================
 
 function sanitizeDetectionMetadata(
     detections
 ) {
-
-    if (
-        !Array.isArray(detections)
-    ) {
+    if (!Array.isArray(detections)) {
         return [];
     }
 
-
     return detections
         .map(
-            (
-                detection
-            ) => {
-
+            detection => {
                 if (
                     !detection ||
                     typeof detection !== "object" ||
@@ -156,75 +485,39 @@ function sanitizeDetectionMetadata(
                     return null;
                 }
 
-
                 const sourceRect =
                     detection.rect;
 
-
                 let rect = null;
-
 
                 if (
                     sourceRect &&
                     typeof sourceRect === "object"
                 ) {
-
-                    const left =
-                        Number(
-                            sourceRect.left
-                        );
-
-                    const top =
-                        Number(
-                            sourceRect.top
-                        );
-
-                    const right =
-                        Number(
-                            sourceRect.right
-                        );
-
-                    const bottom =
-                        Number(
-                            sourceRect.bottom
-                        );
-
-                    const width =
-                        Number(
-                            sourceRect.width
-                        );
-
-                    const height =
-                        Number(
-                            sourceRect.height
-                        );
-
+                    const values = [
+                        Number(sourceRect.left),
+                        Number(sourceRect.top),
+                        Number(sourceRect.right),
+                        Number(sourceRect.bottom),
+                        Number(sourceRect.width),
+                        Number(sourceRect.height)
+                    ];
 
                     if (
-                        [
-                            left,
-                            top,
-                            right,
-                            bottom,
-                            width,
-                            height
-                        ]
-                            .every(
-                                Number.isFinite
-                            )
+                        values.every(
+                            Number.isFinite
+                        )
                     ) {
-
                         rect = {
-                            left,
-                            top,
-                            right,
-                            bottom,
-                            width,
-                            height
+                            left: values[0],
+                            top: values[1],
+                            right: values[2],
+                            bottom: values[3],
+                            width: values[4],
+                            height: values[5]
                         };
                     }
                 }
-
 
                 return {
                     id:
@@ -251,42 +544,39 @@ function sanitizeDetectionMetadata(
                 };
             }
         )
-        .filter(
-            Boolean
-        );
+        .filter(Boolean);
 }
 
+function getPrivacySafePageUrl(
+    rawUrl
+) {
+    if (!rawUrl) {
+        return "";
+    }
 
-// ============================================================
-// PRIVACY-SAFE ACTION LOGGING
-// ============================================================
-//
-// NEVER log the complete planner action.
-//
-// TYPE actions may contain:
-//
-//     text: "Amit Kumar"
-//
-// or potentially sensitive text.
-//
-// Only action metadata is logged.
-//
-// ============================================================
+    try {
+        const url =
+            new URL(rawUrl);
+
+        return (
+            `${url.origin}${url.pathname}`
+        );
+    } catch (_) {
+        return "";
+    }
+}
 
 function getSafeActionLog(
     action
 ) {
-
     if (
         !action ||
         typeof action !== "object"
     ) {
-
         return {
             action: "none"
         };
     }
-
 
     const actionType =
         String(
@@ -297,12 +587,10 @@ function getSafeActionLog(
             .toLowerCase()
             .trim();
 
-
     const rawConfidence =
         Number(
             action.confidence
         );
-
 
     const confidence =
         Number.isFinite(
@@ -317,44 +605,39 @@ function getSafeActionLog(
             )
             : 0;
 
-
     const safe = {
         action:
             actionType,
-
         confidence
     };
 
-
     if (
-    actionType === "click"
-) {
-    safe.target = {
-        x:
-            Number(
-                action.x ??
-                action.target?.x ??
-                0
-            ),
+        actionType === "click"
+    ) {
+        safe.target = {
+            x:
+                Number(
+                    action.x ??
+                    action.target?.x ??
+                    0
+                ),
 
-        y:
-            Number(
-                action.y ??
-                action.target?.y ??
-                0
-            ),
+            y:
+                Number(
+                    action.y ??
+                    action.target?.y ??
+                    0
+                ),
 
-        submitIntent:
-            action?.submitIntent === true ||
-            action?.target?.submitIntent === true
-    };
-}
-
+            submitIntent:
+                action.submitIntent === true ||
+                action.target?.submitIntent === true
+        };
+    }
 
     if (
         actionType === "type"
     ) {
-
         safe.valueLength =
             String(
                 action.text ??
@@ -363,12 +646,10 @@ function getSafeActionLog(
             ).length;
     }
 
-
     if (
         actionType === "scroll" ||
         actionType === "wait"
     ) {
-
         safe.amount =
             Number(
                 action.amount ??
@@ -377,97 +658,17 @@ function getSafeActionLog(
             );
     }
 
-
     return safe;
 }
-
-
-// ============================================================
-// PRIVACY-SAFE PAGE URL
-// ============================================================
-//
-// Never transmit:
-//
-// - query parameters
-// - URL fragments
-// - username/password from URL
-// - tokens
-// - email addresses embedded in query strings
-//
-// Example:
-//
-// https://example.com/form?email=user@example.com&token=123
-//
-// becomes:
-//
-// https://example.com/form
-//
-// ============================================================
-
-function getPrivacySafePageUrl(
-    rawUrl
-) {
-
-    if (
-        !rawUrl
-    ) {
-
-        return "";
-    }
-
-
-    try {
-
-        const url =
-            new URL(
-                rawUrl
-            );
-
-
-        return (
-            `${url.origin}${url.pathname}`
-        );
-
-    } catch (_) {
-
-        return "";
-    }
-}
-
 
 // ============================================================
 // CAPTURE + SANITIZE
 // ============================================================
-//
-// IMPORTANT PRIVACY GUARANTEE:
-//
-// The raw screenshot is:
-//
-//     captureVisibleTab()
-//             |
-//             v
-//     content.js
-//             |
-//             v
-//     local redaction
-//             |
-//             v
-//     sanitized screenshot
-//
-// Raw screenshot is NEVER returned from this function.
-//
-// ============================================================
 
 async function captureAndSanitize() {
-
     console.log(
         "[CAPTURE] Starting local capture and sanitization."
     );
-
-
-    // ========================================================
-    // GET ACTIVE TAB
-    // ========================================================
 
     const tabs =
         await chrome.tabs.query({
@@ -475,77 +676,60 @@ async function captureAndSanitize() {
             currentWindow: true
         });
 
-
     if (
         !Array.isArray(tabs) ||
         tabs.length === 0
     ) {
-
         throw new Error(
             "No active browser tab found."
         );
     }
 
-
     const tab =
         tabs[0];
 
-
     if (
         !tab ||
-        !tab.id
+        !Number.isInteger(tab.id)
     ) {
-
         throw new Error(
             "Active tab has no valid ID."
         );
     }
-
 
     if (
         !Number.isInteger(
             tab.windowId
         )
     ) {
-
         throw new Error(
             "Active tab has no valid window ID."
         );
     }
-
 
     console.log(
         "[CAPTURE] Active tab:",
         tab.id
     );
 
-
-    // ========================================================
-    // PREPARE PRIVACY ENGINE
-    // ========================================================
-
     let prepareResponse;
 
-
     try {
-
         prepareResponse =
-            await chrome.tabs.sendMessage(
+            await sendTabMessage(
                 tab.id,
                 {
                     type:
                         "PREPARE_CAPTURE"
-                }
+                },
+                PREPARE_CAPTURE_TIMEOUT_MS,
+                "PREPARE_CAPTURE"
             );
-
     } catch (error) {
-
         console.error(
             "[CAPTURE] PREPARE_CAPTURE failed:",
-            error?.message ||
-            error
+            error.message
         );
-
 
         throw new Error(
             "Could not communicate with content script. " +
@@ -553,400 +737,259 @@ async function captureAndSanitize() {
         );
     }
 
-
     if (
         !prepareResponse ||
         typeof prepareResponse !== "object"
     ) {
-
         throw new Error(
             "Privacy engine returned an invalid response."
         );
     }
 
-
     if (
         prepareResponse.success !== true
     ) {
-
         throw new Error(
             prepareResponse.error ||
             "Privacy engine could not prepare the capture."
         );
     }
 
-
-    console.log(
-        "[PRIVACY] Local PII detection completed:",
-        Array.isArray(
-            prepareResponse.detections
-        )
-            ? prepareResponse.detections.length
-            : 0,
-        "regions"
-    );
-
-
-    // ========================================================
-    // SANITIZE DETECTION METADATA
-    // ========================================================
-    //
-    // IMPORTANT:
-    //
-    // prepareResponse must exist before it is used.
-    //
-    // Only sanitized detection metadata leaves the background
-    // capture boundary.
-    //
-    // ========================================================
-
     const safeDetections =
         sanitizeDetectionMetadata(
             prepareResponse.detections || []
         );
 
-
-    // ========================================================
-    // CAPTURE VISIBLE TAB
-    // ========================================================
-
-    let screenshot;
-
-
-    try {
-
-        screenshot =
-            await chrome.tabs.captureVisibleTab(
-                tab.windowId,
-                {
-                    format: "png"
-                }
-            );
-
-    } catch (error) {
-
-        console.error(
-            "[CAPTURE] Screenshot capture failed:",
-            error?.message ||
-            error
-        );
-
-
-        throw new Error(
-            "Could not capture the current screen: " +
-            (
-                error?.message ||
-                "Unknown capture error"
-            )
-        );
-    }
-
-
-    if (
-        typeof screenshot !== "string" ||
-        screenshot.length === 0
-    ) {
-
-        throw new Error(
-            "Browser returned an empty screenshot."
-        );
-    }
-
-
     console.log(
-        "[CAPTURE] Raw screenshot captured locally."
+        "[PRIVACY] Local PII detection completed:",
+        safeDetections.length,
+        "regions"
     );
 
-
-    // ========================================================
-    // LOCAL SANITIZATION
-    // ========================================================
-    //
-    // The raw screenshot exists only inside the extension.
-    //
-    // It is sent to content.js solely for local redaction.
-    //
-    // It is NEVER returned to popup.js.
-    // It is NEVER sent directly to FastAPI.
-    //
-    // ========================================================
-
-    let sanitizeResponse;
-
+    let screenshot = null;
 
     try {
+        try {
+            screenshot =
+                await chrome.tabs.captureVisibleTab(
+                    tab.windowId,
+                    {
+                        format: "png"
+                    }
+                );
+        } catch (error) {
+            console.error(
+                "[CAPTURE] Screenshot capture failed:",
+                error?.message ||
+                error
+            );
 
-        sanitizeResponse =
-            await chrome.tabs.sendMessage(
-                tab.id,
-                {
-                    type:
-                        "SANITIZE_SCREENSHOT",
+            throw new Error(
+                "Could not capture the current screen: " +
+                (
+                    error?.message ||
+                    "Unknown capture error"
+                )
+            );
+        }
 
-                    screenshot:
+        if (
+            typeof screenshot !== "string" ||
+            screenshot.length === 0
+        ) {
+            throw new Error(
+                "Browser returned an empty screenshot."
+            );
+        }
+
+        console.log(
+            "[CAPTURE] Raw screenshot captured locally."
+        );
+
+        let sanitizeResponse;
+
+        try {
+            sanitizeResponse =
+                await sendTabMessage(
+                    tab.id,
+                    {
+                        type:
+                            "SANITIZE_SCREENSHOT",
+
                         screenshot,
 
-                    detections:
-                        safeDetections
-                }
+                        detections:
+                            safeDetections
+                    },
+                    SANITIZE_CAPTURE_TIMEOUT_MS,
+                    "SANITIZE_SCREENSHOT"
+                );
+        } catch (error) {
+            console.error(
+                "[PRIVACY] SANITIZE_SCREENSHOT failed:",
+                error.message
             );
 
-    } catch (error) {
+            throw new Error(
+                "Could not sanitize the screenshot: " +
+                error.message
+            );
+        }
 
-        console.error(
-            "[PRIVACY] SANITIZE_SCREENSHOT failed:",
-            error?.message ||
-            error
-        );
+        if (
+            !sanitizeResponse ||
+            typeof sanitizeResponse !== "object"
+        ) {
+            throw new Error(
+                "Sanitization returned an invalid response."
+            );
+        }
 
+        if (
+            sanitizeResponse.success !== true
+        ) {
+            throw new Error(
+                sanitizeResponse.error ||
+                "Screenshot sanitization failed."
+            );
+        }
 
-        throw new Error(
-            "Could not sanitize the screenshot: " +
-            (
-                error?.message ||
-                "Unknown sanitization error"
+        if (
+            typeof sanitizeResponse.sanitizedImage !==
+                "string" ||
+            sanitizeResponse.sanitizedImage.length === 0
+        ) {
+            throw new Error(
+                "Sanitized screenshot was empty."
+            );
+        }
+
+        const safeDomElements =
+            Array.isArray(
+                sanitizeResponse.dom_elements
             )
+                ? sanitizeResponse.dom_elements
+                : (
+                    Array.isArray(
+                        prepareResponse.dom_elements
+                    )
+                        ? prepareResponse.dom_elements
+                        : []
+                );
+
+        console.log(
+            "[PRIVACY] Screenshot sanitized locally."
         );
+
+        return {
+            success: true,
+
+            sanitizedImage:
+                sanitizeResponse.sanitizedImage,
+
+            detections:
+                safeDetections,
+
+            dom_elements:
+                safeDomElements,
+
+            viewport:
+                sanitizeResponse.viewport ||
+                prepareResponse.viewport ||
+                null,
+
+            page_url:
+                getPrivacySafePageUrl(
+                    tab.url
+                ),
+
+            tab_id:
+                tab.id,
+
+            window_id:
+                tab.windowId
+        };
+    } finally {
+        screenshot = null;
     }
-
-
-    // Explicitly release our reference to the raw screenshot
-    // as soon as local sanitization has completed.
-    screenshot = null;
-
-
-    if (
-        !sanitizeResponse ||
-        typeof sanitizeResponse !== "object"
-    ) {
-
-        throw new Error(
-            "Sanitization returned an invalid response."
-        );
-    }
-
-
-    if (
-        sanitizeResponse.success !== true
-    ) {
-
-        throw new Error(
-            sanitizeResponse.error ||
-            "Screenshot sanitization failed."
-        );
-    }
-
-
-    if (
-        typeof sanitizeResponse.sanitizedImage !== "string" ||
-        sanitizeResponse.sanitizedImage.length === 0
-    ) {
-
-        throw new Error(
-            "Sanitized screenshot was empty."
-        );
-    }
-
-
-    console.log(
-        "[PRIVACY] Screenshot sanitized locally."
-    );
-
-
-    // ========================================================
-    // SANITIZED DOM METADATA
-    // ========================================================
-    //
-    // content.js is responsible for producing safe DOM
-    // metadata. background.js intentionally does not copy
-    // arbitrary DOM values.
-    //
-    // The existing popup privacy gate performs another
-    // allowlist check before the network request.
-    //
-    // ========================================================
-
-    const safeDomElements =
-        Array.isArray(
-            sanitizeResponse.dom_elements
-        )
-            ? sanitizeResponse.dom_elements
-            : (
-                Array.isArray(
-                    prepareResponse.dom_elements
-                )
-                    ? prepareResponse.dom_elements
-                    : []
-            );
-
-
-    // ========================================================
-    // RETURN ONLY SANITIZED DATA
-    // ========================================================
-
-    return {
-
-        success: true,
-
-        // Sanitized screenshot only.
-        sanitizedImage:
-            sanitizeResponse.sanitizedImage,
-
-        // Detection geometry only.
-        // No PII values.
-        detections:
-            safeDetections,
-
-        // DOM metadata produced by the privacy engine.
-        dom_elements:
-            safeDomElements,
-
-        viewport:
-            sanitizeResponse.viewport ||
-            prepareResponse.viewport ||
-            null,
-
-        // Privacy-safe URL.
-        page_url:
-            getPrivacySafePageUrl(
-                tab.url
-            ),
-
-        // These IDs are extension-internal metadata.
-        // They are not sent to FastAPI by the background
-        // service itself.
-        tab_id:
-            tab.id,
-
-        window_id:
-            tab.windowId
-    };
 }
 
-
 // ============================================================
-// PHASE 6 — SAFE SEMANTIC TARGET
-// ============================================================
-//
-// Allows text/label/name targets only.
-// Arbitrary CSS selectors from the planner are NOT allowed.
+// ACTION VALIDATION
 // ============================================================
 
 function normalizeAgentTarget(
     target
 ) {
-
     if (
         !target ||
-        typeof target !== "object"
+        typeof target !== "object" ||
+        Array.isArray(target)
     ) {
-
         return null;
     }
-
 
     const text =
         typeof target.text === "string"
             ? target.text.trim()
             : "";
 
-
     const label =
         typeof target.label === "string"
             ? target.label.trim()
             : "";
-
 
     const name =
         typeof target.name === "string"
             ? target.name.trim()
             : "";
 
-
     if (
         !text &&
         !label &&
         !name
     ) {
-
         return null;
     }
 
-
     return {
-
         ...(text
-            ? { text: text.slice(0, 120) }
+            ? {
+                text:
+                    text.slice(0, 120)
+            }
             : {}),
 
         ...(label
-            ? { label: label.slice(0, 120) }
+            ? {
+                label:
+                    label.slice(0, 120)
+            }
             : {}),
 
         ...(name
-            ? { name: name.slice(0, 120) }
+            ? {
+                name:
+                    name.slice(0, 120)
+            }
             : {})
     };
 }
 
-
-// ============================================================
-// NORMALIZE + VALIDATE AI ACTION
-// ============================================================
-//
-// The planner is UNTRUSTED INPUT.
-//
-// Do not trust:
-//
-//     action.type
-//
-// Do not trust:
-//
-//     action.action
-//
-// Do not trust:
-//
-//     action.x
-//
-// Do not trust:
-//
-//     action.y
-//
-// Do not trust:
-//
-//     action.text
-//
-// Every supported action must pass this boundary.
-//
-// ============================================================
-
 function normalizeBrowserAction(
     action
 ) {
-
-    // ========================================================
-    // ACTION OBJECT VALIDATION
-    // ========================================================
-
     if (
         !action ||
         typeof action !== "object" ||
         Array.isArray(action)
     ) {
-
         return {
-            type:
-                "none",
-
+            type: "none",
             error:
                 "Invalid AI action object."
         };
     }
-
-
-    // ========================================================
-    // READ ACTION NAME
-    // ========================================================
 
     const actionName =
         String(
@@ -957,45 +1000,24 @@ function normalizeBrowserAction(
             .toLowerCase()
             .trim();
 
-
-    // ========================================================
-    // ALLOWED ACTION CHECK
-    // ========================================================
-
     if (
         !ALLOWED_ACTIONS.has(
             actionName
         )
     ) {
-
         return {
-            type:
-                "none",
-
+            type: "none",
             error:
                 `Unsupported AI action: ${
-                    actionName ||
-                    "missing"
+                    actionName || "missing"
                 }`
         };
     }
-
-
-    // ========================================================
-    // CONFIDENCE
-    // ========================================================
-    //
-    // Confidence is metadata, not authorization.
-    //
-    // It must never become NaN or Infinity.
-    //
-    // ========================================================
 
     const rawConfidence =
         Number(
             action.confidence
         );
-
 
     const confidence =
         Number.isFinite(
@@ -1010,105 +1032,40 @@ function normalizeBrowserAction(
             )
             : 0;
 
-
-    // ========================================================
-    // NONE
-    // ========================================================
-
     if (
         actionName === "none"
     ) {
-
         return {
-            type:
-                "none",
-
-            confidence:
-                confidence
+            type: "none",
+            confidence
         };
     }
 
-
-    // ========================================================
-    // CLICK
-    // ========================================================
-
-    if (actionName === "click") {
-
-    // PHASE 6 — semantic target (text/label/name), no selectors
-    const semanticTarget =
-        normalizeAgentTarget(
-            action?.target
-        );
-
-    if (semanticTarget) {
-
-        const semanticSubmitIntent =
-            action?.submitIntent === true ||
-            action?.target?.submitIntent === true;
-
-        return {
-            type: "click",
-            target: {
-                ...semanticTarget,
-                submitIntent: semanticSubmitIntent
-            },
-            submitIntent: semanticSubmitIntent,
-            confidence: confidence
-        };
-    }
-
-    const x = Number(
-        action?.x ??
-        action?.target?.x
-    );
-
-    const y = Number(
-        action?.y ??
-        action?.target?.y
-    );
-
     if (
-        !Number.isFinite(x) ||
-        !Number.isFinite(y)
+        actionName === "click"
     ) {
-        throw new Error(
-            "Invalid click coordinates."
-        );
-    }
-
-    const submitIntent =
-        action?.submitIntent === true ||
-        action?.target?.submitIntent === true;
-
-    return {
-        type: "click",
-        target: {
-            x: x,
-            y: y,
-            submitIntent: submitIntent
-        },
-        submitIntent: submitIntent,
-        confidence: confidence
-    };
-
-    }
-
-
-    // ========================================================
-    // TYPE
-    // ========================================================
-
-    if (
-        actionName === "type"
-    ) {
-
-        // PHASE 6 — semantic target (text/label/name), no selectors
         const semanticTarget =
             normalizeAgentTarget(
                 action.target
             );
 
+        const submitIntent =
+            action.submitIntent === true ||
+            action.target?.submitIntent === true;
+
+        if (semanticTarget) {
+            return {
+                type: "click",
+
+                target: {
+                    ...semanticTarget,
+                    submitIntent
+                },
+
+                submitIntent,
+                confidence
+            };
+        }
 
         const x =
             Number(
@@ -1116,13 +1073,58 @@ function normalizeBrowserAction(
                 action.target?.x
             );
 
-
         const y =
             Number(
                 action.y ??
                 action.target?.y
             );
 
+        if (
+            !Number.isFinite(x) ||
+            !Number.isFinite(y) ||
+            x < 0 ||
+            y < 0
+        ) {
+            return {
+                type: "none",
+                error:
+                    "Invalid click coordinates."
+            };
+        }
+
+        return {
+            type: "click",
+
+            target: {
+                x,
+                y,
+                submitIntent
+            },
+
+            submitIntent,
+            confidence
+        };
+    }
+
+    if (
+        actionName === "type"
+    ) {
+        const semanticTarget =
+            normalizeAgentTarget(
+                action.target
+            );
+
+        const x =
+            Number(
+                action.x ??
+                action.target?.x
+            );
+
+        const y =
+            Number(
+                action.y ??
+                action.target?.y
+            );
 
         if (
             !semanticTarget &&
@@ -1131,16 +1133,12 @@ function normalizeBrowserAction(
                 !Number.isFinite(y)
             )
         ) {
-
             return {
-                type:
-                    "none",
-
+                type: "none",
                 error:
                     "AI returned invalid type coordinates."
             };
         }
-
 
         if (
             !semanticTarget &&
@@ -1149,73 +1147,40 @@ function normalizeBrowserAction(
                 y < 0
             )
         ) {
-
             return {
-                type:
-                    "none",
-
+                type: "none",
                 error:
                     "AI returned negative type coordinates."
             };
         }
 
-
-        // ====================================================
-        // EXPLICIT VALUE REQUIRED
-        // ====================================================
-
         const value =
             action.text ??
             action.value;
-
 
         if (
             value === undefined ||
             value === null
         ) {
-
             return {
-                type:
-                    "none",
-
+                type: "none",
                 error:
                     "TYPE action is missing an explicit value."
             };
         }
 
-
         const stringValue =
-            String(
-                value
-            );
-
+            String(value);
 
         if (
             stringValue.length === 0
         ) {
-
             return {
-                type:
-                    "none",
-
+                type: "none",
                 error:
                     "TYPE action contains an empty value."
             };
         }
-
-
-        // ====================================================
-        // PROTECTED FIELD METADATA
-        // ====================================================
-        //
-        // The background cannot inspect the live DOM.
-        //
-        // content.js performs the final DOM-level validation.
-        //
-        // However, if the planner explicitly tells us that the
-        // target is a credential field, reject it here too.
-        //
-        // ====================================================
 
         const targetMetadata =
             [
@@ -1229,13 +1194,12 @@ function normalizeBrowserAction(
                 action.targetType
             ]
                 .filter(
-                    value =>
-                        value !== undefined &&
-                        value !== null
+                    item =>
+                        item !== undefined &&
+                        item !== null
                 )
                 .join(" ")
                 .toLowerCase();
-
 
         if (
             /\b(password|passwd|passcode|credential|credentials|otp|one[- ]time[- ]password|security[- ]code|pin)\b/i
@@ -1243,76 +1207,62 @@ function normalizeBrowserAction(
                     targetMetadata
                 )
         ) {
-
             return {
-                type:
-                    "none",
-
+                type: "none",
                 error:
                     "TYPE action targeted a protected credential field."
             };
         }
 
-
-        // ====================================================
-        // RETURN SAFE TYPE ACTION
-        // ====================================================
-        //
-        // The actual value is required for the local browser
-        // operation, but it is NEVER included in console logs.
-        //
-        // ====================================================
-
         const submitIntent =
-    action?.submitIntent === true ||
-    action?.target?.submitIntent === true;
+            action.submitIntent === true ||
+            action.target?.submitIntent === true;
 
-return {
-    type: "type",
-    target: semanticTarget
-        ? semanticTarget
-        : {
-            x: x,
-            y: y
-        },
-    text: stringValue,
-    confidence: confidence
-};
+        return {
+            type: "type",
+
+            target:
+                semanticTarget
+                    ? {
+                        ...semanticTarget,
+                        submitIntent
+                    }
+                    : {
+                        x,
+                        y,
+                        submitIntent
+                    },
+
+            text:
+                stringValue,
+
+            submitIntent,
+
+            confidence
+        };
     }
-
-
-    // ========================================================
-    // SCROLL
-    // ========================================================
 
     if (
         actionName === "scroll"
     ) {
-
         let amount =
             Number(
                 action.amount ??
                 action.value
             );
 
-
         if (
             !Number.isFinite(
                 amount
             )
         ) {
-
             return {
-                type:
-                    "none",
-
+                type: "none",
                 error:
                     "AI returned an invalid scroll amount."
             };
         }
 
-
-        // Bound one scroll operation.
         amount =
             Math.max(
                 -MAX_SCROLL_AMOUNT,
@@ -1322,65 +1272,43 @@ return {
                 )
             );
 
-
         if (
             amount === 0
         ) {
-
             return {
-                type:
-                    "none",
-
+                type: "none",
                 error:
                     "AI returned a zero scroll amount."
             };
         }
 
-
         return {
-
-            type:
-                "scroll",
-
-            value:
-                amount,
-
-            confidence:
-                confidence
+            type: "scroll",
+            value: amount,
+            confidence
         };
     }
-
-
-    // ========================================================
-    // WAIT
-    // ========================================================
 
     if (
         actionName === "wait"
     ) {
-
         let milliseconds =
             Number(
                 action.amount ??
                 action.value
             );
 
-
         if (
             !Number.isFinite(
                 milliseconds
             )
         ) {
-
             return {
-                type:
-                    "none",
-
+                type: "none",
                 error:
                     "AI returned an invalid wait duration."
             };
         }
-
 
         milliseconds =
             Math.max(
@@ -1391,91 +1319,58 @@ return {
                 )
             );
 
-
         return {
-
-            type:
-                "wait",
-
-            value:
-                milliseconds,
-
-            confidence:
-                confidence
+            type: "wait",
+            value: milliseconds,
+            confidence
         };
     }
 
-
-    // ========================================================
-    // FALLBACK
-    // ========================================================
-
     return {
-
-        type:
-            "none",
-
+        type: "none",
         error:
             "Unsupported browser action."
     };
 }
 
 // ============================================================
-// PHASE 6 — REQUEST FRESH PERCEPTION
-// ============================================================
-//
-// The planner must not reuse stale page state.
-//
-// Every browser action starts from a fresh local perception.
+// FRESH PERCEPTION
 // ============================================================
 
 async function requestFreshAgentPerception(
     tabId
 ) {
-
-    if (
-        !tabId
-    ) {
-
+    if (!Number.isInteger(tabId)) {
         return {
-
-            success:
-                false,
-
+            success: false,
             error:
                 "Invalid tab ID."
         };
     }
 
-
     try {
-
         const response =
-            await chrome.tabs.sendMessage(
+            await sendTabMessage(
                 tabId,
                 {
                     type:
                         "GET_AGENT_PERCEPTION"
-                }
+                },
+                PERCEPTION_TIMEOUT_MS,
+                "GET_AGENT_PERCEPTION"
             );
-
 
         if (
             !response ||
             response.success !== true
         ) {
-
             return {
-
-                success:
-                    false,
-
+                success: false,
                 error:
                     response?.error ||
                     "Fresh perception failed."
             };
         }
-
 
         if (
             !response.perception ||
@@ -1483,17 +1378,12 @@ async function requestFreshAgentPerception(
                 response.perception.dom
             )
         ) {
-
             return {
-
-                success:
-                    false,
-
+                success: false,
                 error:
                     "Fresh perception returned invalid data."
             };
         }
-
 
         console.log(
             "[PHASE 6][PERCEPTION] Received:",
@@ -1509,156 +1399,82 @@ async function requestFreshAgentPerception(
             }
         );
 
-
         return response;
-
     } catch (error) {
-
         console.error(
             "[PHASE 6][PERCEPTION] Communication failed:",
             error?.message ||
             error
         );
 
-
         return {
-
-            success:
-                false,
-
+            success: false,
             error:
                 "Could not communicate with content script."
         };
     }
 }
+
 // ============================================================
-// EXECUTE BROWSER ACTION
-// ============================================================
-//
-// IMPORTANT:
-//
-// The raw planner action is NEVER forwarded directly.
-//
-// Flow:
-//
-//     planner action
-//           |
-//           v
-//     normalizeBrowserAction()
-//           |
-//           v
-//     validated action
-//           |
-//           v
-//     content.js
-//
+// EXECUTE ACTION
 // ============================================================
 
 async function executeBrowserAction(
     action
 ) {
+    let plannerAction =
+        action;
 
-    // ========================================================
-    // NORMALIZE + VALIDATE
-    // ========================================================
-
-    // ========================================================
-// PHASE 6 — ACTION SHAPE NORMALIZATION
-// ========================================================
-//
-// Accept the planner action whether it arrives as:
-//   { action: "click", x, y }
-//   { type: "click", x, y }
-//
-// Also safely unwrap accidental Phase 6 wrappers such as:
-//   { action: { action: "click", ... } }
-//   { result: { action: { action: "click", ... } } }
-//
-// ========================================================
-
-let plannerAction = action;
-
-if (
-    plannerAction?.action &&
-    typeof plannerAction.action === "object"
-) {
-    plannerAction =
-        plannerAction.action;
-}
-
-if (
-    plannerAction?.result?.action &&
-    typeof plannerAction.result.action === "object"
-) {
-    plannerAction =
-        plannerAction.result.action;
-}
-
-console.log(
-    "[PHASE 6][ACTION INPUT]",
-    {
-        hasAction:
-            Boolean(plannerAction?.action),
-
-        hasType:
-            Boolean(plannerAction?.type),
-
-        action:
-            plannerAction?.action ||
-            plannerAction?.type ||
-            "missing",
-
-        keys:
-            plannerAction &&
-            typeof plannerAction === "object"
-                ? Object.keys(plannerAction)
-                : []
+    if (
+        plannerAction?.action &&
+        typeof plannerAction.action ===
+            "object"
+    ) {
+        plannerAction =
+            plannerAction.action;
     }
-);
 
-const normalizedAction =
-    normalizeBrowserAction(
-        plannerAction
-    );
-
+    if (
+        plannerAction?.result?.action &&
+        typeof plannerAction.result.action ===
+            "object"
+    ) {
+        plannerAction =
+            plannerAction.result.action;
+    }
 
     console.log(
-        "[ACTION] Validated planner action:",
+        "[ACTION] Input:",
+        {
+            action:
+                plannerAction?.action ||
+                plannerAction?.type ||
+                "missing"
+        }
+    );
+
+    const normalizedAction =
+        normalizeBrowserAction(
+            plannerAction
+        );
+
+    console.log(
+        "[ACTION] Validated:",
         getSafeActionLog(
             normalizedAction
         )
     );
 
-
-    // ========================================================
-    // REJECT INVALID ACTION
-    // ========================================================
-
     if (
         normalizedAction.type === "none" &&
         normalizedAction.error
     ) {
-
-        console.warn(
-            "[ACTION] Planner action rejected:",
-            normalizedAction.error
-        );
-
-
         return {
-
-            success:
-                false,
-
+            success: false,
             error:
                 normalizedAction.error
         };
     }
-
-
-    // ========================================================
-    // GET ACTIVE TAB
-    // ========================================================
 
     const tabs =
         await chrome.tabs.query({
@@ -1666,96 +1482,55 @@ const normalizedAction =
             currentWindow: true
         });
 
-
     if (
         !Array.isArray(tabs) ||
         tabs.length === 0
     ) {
-
         return {
-
-            success:
-                false,
-
+            success: false,
             error:
                 "No active browser tab found."
         };
     }
 
-
     const tab =
         tabs[0];
 
-
     if (
         !tab ||
-        !tab.id
+        !Number.isInteger(tab.id)
     ) {
-
         return {
-
-            success:
-                false,
-
+            success: false,
             error:
                 "Active tab has no valid ID."
         };
     }
-
-
-    // ========================================================
-    // PHASE 6 — FRESH PERCEPTION BEFORE ACTION
-    // ========================================================
 
     const perception =
         await requestFreshAgentPerception(
             tab.id
         );
 
-
     if (
         !perception.success
     ) {
-
-        console.warn(
-            "[PHASE 6] Action blocked because fresh perception failed:",
-            perception.error
-        );
-
-
         return {
-
-            success:
-                false,
-
+            success: false,
             action:
                 "perception_failed",
-
             retryable:
                 true,
-
             error:
                 perception.error
         };
     }
 
-
-    // ========================================================
-    // SEND ONLY VALIDATED ACTION
-    // ========================================================
-
     let response;
 
-
     try {
-
-        console.log(
-            "[ACTION] Sending validated action to content script."
-        );
-
-
         response =
-            await chrome.tabs.sendMessage(
+            await sendTabMessage(
                 tab.id,
                 {
                     type:
@@ -1763,103 +1538,68 @@ const normalizedAction =
 
                     action:
                         normalizedAction
-                }
+                },
+                ACTION_TIMEOUT_MS,
+                "EXECUTE_ACTION"
             );
-
     } catch (error) {
-
         console.error(
             "[ACTION] Content script communication failed:",
-            error?.message ||
-            error
+            error.message
         );
 
-
         return {
-
-            success:
-                false,
-
+            success: false,
             error:
-                "Could not communicate with content script: " +
-                (
-                    error?.message ||
-                    "Unknown error"
-                )
+                error.message
         };
     }
-
-
-    // ========================================================
-    // STRICT RESPONSE VALIDATION
-    // ========================================================
-    //
-    // An undefined or malformed response is NOT success.
-    //
-    // ========================================================
 
     if (
         !response ||
         typeof response !== "object"
     ) {
-
         return {
-
-            success:
-                false,
-
+            success: false,
             error:
                 "Content script returned an invalid response."
         };
     }
 
-
     if (
-    response.success !== true
-) {
-    return {
-        success: false,
+        response.success !== true
+    ) {
+        return {
+            success: false,
 
-        action:
-            response.action ||
-            normalizedAction.type,
+            action:
+                response.action ||
+                normalizedAction.type,
 
-        retryable:
-            response.retryable === true,
+            retryable:
+                response.retryable === true,
 
-        unsafe:
-            response.unsafe === true,
+            unsafe:
+                response.unsafe === true,
 
-        error:
-            response.error ||
-            response.message ||
-            "Browser action was rejected."
-    };
-
+            error:
+                response.error ||
+                response.message ||
+                "Browser action was rejected."
+        };
     }
-
-
-    // ========================================================
-    // SAFE RESULT
-    // ========================================================
 
     console.log(
         "[ACTION] Browser action completed:",
         {
-            success:
-                true,
-
             action:
                 response.action ||
                 normalizedAction.type
         }
     );
 
-
     return {
-
-        success:
-            true,
+        success: true,
 
         action:
             response.action ||
@@ -1870,31 +1610,10 @@ const normalizedAction =
     };
 }
 
-
 // ============================================================
-// BENCHMARK
-// ============================================================
-//
-// This section is intentionally separate from the production
-// CAPTURE_AND_SANITIZE / EXECUTE_BROWSER_ACTION pipeline.
-//
-// Purpose:
-//   Bridge pii-accuracy-test.html to the existing OCR pipeline
-//   (content.js -> ocr.js) without introducing a second raw
-//   screenshot exit point and without duplicating the detailed
-//   metrics that already live inside ocr.js.
-//
-// Boundary:
-//   - Never returns raw screenshots.
-//   - Never returns detected PII text/values.
-//   - Only returns type / confidence / detected booleans and
-//     the aggregate benchmark report produced by ocr.js.
-//
+// OCR BENCHMARK
 // ============================================================
 
-
-// Lightweight, background-level counters only.
-// Detailed OCR metrics remain the responsibility of ocr.js.
 const benchmarkStats = {
     runs: 0,
     successful: 0,
@@ -1902,76 +1621,24 @@ const benchmarkStats = {
     totalLatencyMs: 0
 };
 
-
-// ------------------------------------------------------------
-// TIMEOUT WRAPPER
-// ------------------------------------------------------------
-//
-// Prevents the benchmark UI from hanging forever if OCR /
-// Tesseract gets stuck inside the content script.
-//
-// ------------------------------------------------------------
-
-function withTimeout(
-    promise,
-    timeoutMs = OCR_BENCHMARK_TIMEOUT_MS
-) {
-
-    return Promise.race([
-
-        promise,
-
-        new Promise(
-            (_, reject) =>
-                setTimeout(
-                    () =>
-                        reject(
-                            new Error(
-                                "Benchmark timeout."
-                            )
-                        ),
-                    timeoutMs
-                )
-        )
-    ]);
-}
-
-
-// ------------------------------------------------------------
-// SANITIZE BENCHMARK RESULT
-// ------------------------------------------------------------
-//
-// Defense-in-depth, mirroring sanitizeDetectionMetadata().
-//
-// Only classification-level fields are kept. Detected PII
-// text, OCR words, and raw screenshots are never copied here,
-// even if a compromised or buggy content script were to send
-// them.
-//
-// ------------------------------------------------------------
-
 function sanitizeBenchmarkDetections(
     detections
 ) {
-
     if (
         !Array.isArray(detections)
     ) {
         return [];
     }
 
-
     return detections
         .map(
             detection => {
-
                 if (
                     !detection ||
                     typeof detection !== "object"
                 ) {
                     return null;
                 }
-
 
                 const type =
                     String(
@@ -1980,31 +1647,33 @@ function sanitizeBenchmarkDetections(
                         .toUpperCase()
                         .trim();
 
-
                 if (
-                    !ALLOWED_BENCHMARK_TYPES.has(type)
+                    !ALLOWED_BENCHMARK_TYPES.has(
+                        type
+                    )
                 ) {
                     return null;
                 }
-
 
                 const rawConfidence =
                     Number(
                         detection.confidence
                     );
 
-
                 const confidence =
-                    Number.isFinite(rawConfidence)
+                    Number.isFinite(
+                        rawConfidence
+                    )
                         ? Math.min(
                             1,
-                            Math.max(0, rawConfidence)
+                            Math.max(
+                                0,
+                                rawConfidence
+                            )
                         )
                         : 0;
 
-
                 return {
-
                     type,
 
                     confidence,
@@ -2017,11 +1686,9 @@ function sanitizeBenchmarkDetections(
         .filter(Boolean);
 }
 
-
 function sanitizeBenchmarkReport(
     report
 ) {
-
     if (
         !report ||
         typeof report !== "object"
@@ -2029,114 +1696,107 @@ function sanitizeBenchmarkReport(
         return null;
     }
 
-
-    // Only numeric aggregate fields are forwarded. This
-    // object never contains OCR text or PII values, so it
-    // is safe to pass through, but we still rebuild it
-    // field-by-field rather than trusting the shape as-is.
-
     const latency =
-        report.latency && typeof report.latency === "object"
+        report.latency &&
+        typeof report.latency ===
+            "object"
             ? report.latency
             : {};
 
     const words =
-        report.words && typeof report.words === "object"
+        report.words &&
+        typeof report.words ===
+            "object"
             ? report.words
             : {};
 
     const pii =
-        report.pii && typeof report.pii === "object"
+        report.pii &&
+        typeof report.pii ===
+            "object"
             ? report.pii
             : {};
 
     const confidence =
-        report.confidence && typeof report.confidence === "object"
+        report.confidence &&
+        typeof report.confidence ===
+            "object"
             ? report.confidence
             : {};
 
-
     return {
-
         runs:
-            Number(report.runs) || 0,
+            Number(
+                report.runs
+            ) || 0,
 
         latency: {
             averageMs:
-                Number(latency.averageMs) || 0,
+                Number(
+                    latency.averageMs
+                ) || 0,
+
             minMs:
-                Number(latency.minMs) || 0,
+                Number(
+                    latency.minMs
+                ) || 0,
+
             maxMs:
-                Number(latency.maxMs) || 0,
+                Number(
+                    latency.maxMs
+                ) || 0,
+
             totalMs:
-                Number(latency.totalMs) || 0
+                Number(
+                    latency.totalMs
+                ) || 0
         },
 
         words: {
             total:
-                Number(words.total) || 0
+                Number(
+                    words.total
+                ) || 0
         },
 
         pii: {
             total:
-                Number(pii.total) || 0,
+                Number(
+                    pii.total
+                ) || 0,
+
             accepted:
-                Number(pii.accepted) || 0,
+                Number(
+                    pii.accepted
+                ) || 0,
+
             rejected:
-                Number(pii.rejected) || 0
+                Number(
+                    pii.rejected
+                ) || 0
         },
 
         confidence: {
             average:
-                Number(confidence.average) || 0,
+                Number(
+                    confidence.average
+                ) || 0,
+
             threshold:
-                Number(confidence.threshold) || 0
+                Number(
+                    confidence.threshold
+                ) || 0
         }
     };
 }
-
-
-// ------------------------------------------------------------
-// RUN OCR BENCHMARK
-// ------------------------------------------------------------
-//
-// Flow:
-//
-//   Benchmark HTML
-//         |
-//         v
-//   background.js  (this function)
-//         |
-//         v
-//   active tab -> content.js -> ocr.js
-//         |
-//         v
-//   OCR benchmark result
-//         |
-//         v
-//   background.js -> Benchmark HTML
-//
-// ------------------------------------------------------------
 
 async function runOCRBenchmark(
     requestId,
     testCases
 ) {
-
     console.log(
         `[BENCHMARK] Request ${requestId} started`
     );
-
-
-    // ========================================================
-    // GET ACTIVE TAB
-    // ========================================================
-    //
-    // The benchmark is never allowed to specify an arbitrary
-    // tabId. Only the active tab in the current window may be
-    // targeted, matching the production capture flow.
-    //
-    // ========================================================
 
     const tabs =
         await chrome.tabs.query({
@@ -2144,12 +1804,10 @@ async function runOCRBenchmark(
             currentWindow: true
         });
 
-
     if (
         !Array.isArray(tabs) ||
         tabs.length === 0
     ) {
-
         const error =
             new Error(
                 "No active browser tab found."
@@ -2161,35 +1819,17 @@ async function runOCRBenchmark(
         throw error;
     }
 
-
     const tab =
         tabs[0];
 
-
     if (
         !tab ||
-        !tab.id
-    ) {
-
-        const error =
-            new Error(
-                "Active tab has no valid ID."
-            );
-
-        error.code =
-            "NO_ACTIVE_TAB";
-
-        throw error;
-    }
-
-
-    if (
+        !Number.isInteger(tab.id) ||
         !Number.isInteger(tab.windowId)
     ) {
-
         const error =
             new Error(
-                "Active tab has no valid window ID."
+                "Active tab is invalid."
             );
 
         error.code =
@@ -2197,25 +1837,10 @@ async function runOCRBenchmark(
 
         throw error;
     }
-
-
-    // ========================================================
-    // CAPTURE VISIBLE TAB
-    // ========================================================
-    //
-    // The OCR benchmark needs a screenshot of whatever is
-    // currently visible in the active tab, exactly like the
-    // production capture flow. The benchmark page is expected
-    // to scroll the relevant ground-truth/negative-sample
-    // section into view before requesting each run.
-    //
-    // ========================================================
 
     let screenshot;
 
-
     try {
-
         screenshot =
             await chrome.tabs.captureVisibleTab(
                 tab.windowId,
@@ -2224,170 +1849,88 @@ async function runOCRBenchmark(
                 }
             );
 
-    } catch (error) {
+        if (
+            typeof screenshot !== "string" ||
+            screenshot.length === 0
+        ) {
+            const error =
+                new Error(
+                    "Browser returned an empty screenshot."
+                );
 
-        const wrapped =
-            new Error(
-                "Could not capture the current screen: " +
-                (
-                    error?.message ||
-                    "Unknown capture error"
-                )
+            error.code =
+                "OCR_BENCHMARK_FAILED";
+
+            throw error;
+        }
+
+        const response =
+            await sendTabMessage(
+                tab.id,
+                {
+                    type:
+                        "RUN_OCR_BENCHMARK",
+
+                    requestId,
+
+                    testCases,
+
+                    screenshot
+                },
+                OCR_BENCHMARK_TIMEOUT_MS,
+                "RUN_OCR_BENCHMARK"
             );
 
-        wrapped.code =
-            "OCR_BENCHMARK_FAILED";
+        if (
+            !response ||
+            typeof response !== "object"
+        ) {
+            const error =
+                new Error(
+                    "Content script returned an invalid benchmark response."
+                );
 
-        throw wrapped;
-    }
+            error.code =
+                "OCR_BENCHMARK_FAILED";
 
+            throw error;
+        }
 
-    if (
-        typeof screenshot !== "string" ||
-        screenshot.length === 0
-    ) {
+        if (
+            response.success !== true
+        ) {
+            const error =
+                new Error(
+                    response.error ||
+                    "OCR benchmark failed."
+                );
 
-        const error =
-            new Error(
-                "Browser returned an empty screenshot."
-            );
+            error.code =
+                response.code ||
+                "OCR_BENCHMARK_FAILED";
 
-        error.code =
-            "OCR_BENCHMARK_FAILED";
+            throw error;
+        }
 
-        throw error;
-    }
+        return {
+            requestId,
 
+            success: true,
 
-    // ========================================================
-    // FORWARD TO CONTENT SCRIPT
-    // ========================================================
-
-    let response;
-
-
-    try {
-
-        response =
-            await withTimeout(
-                chrome.tabs.sendMessage(
-                    tab.id,
-                    {
-                        type:
-                            "RUN_OCR_BENCHMARK",
-
-                        requestId,
-
-                        testCases,
-
-                        screenshot
-                    }
+            detections:
+                sanitizeBenchmarkDetections(
+                    response.detections
                 ),
-                OCR_BENCHMARK_TIMEOUT_MS
-            );
 
-    } catch (error) {
-
-        const isTimeout =
-            String(
-                error?.message || ""
-            ).includes("timeout");
-
-        const wrapped =
-            new Error(
-                isTimeout
-                    ? "OCR benchmark timed out."
-                    : "Could not communicate with content script. " +
-                      "Please refresh the webpage and try again."
-            );
-
-        wrapped.code =
-            isTimeout
-                ? "OCR_TIMEOUT"
-                : "CONTENT_SCRIPT_UNAVAILABLE";
-
-        throw wrapped;
+            report:
+                sanitizeBenchmarkReport(
+                    response.report
+                )
+        };
+    } finally {
+        screenshot = null;
     }
-
-
-    if (
-        !response ||
-        typeof response !== "object"
-    ) {
-
-        const error =
-            new Error(
-                "Content script returned an invalid benchmark response."
-            );
-
-        error.code =
-            "OCR_BENCHMARK_FAILED";
-
-        throw error;
-    }
-
-
-    if (
-        response.success !== true
-    ) {
-
-        const error =
-            new Error(
-                response.error ||
-                "OCR benchmark failed."
-            );
-
-        error.code =
-            response.code ||
-            "OCR_BENCHMARK_FAILED";
-
-        throw error;
-    }
-
-
-    // ========================================================
-    // SANITIZE RESULT
-    // ========================================================
-    //
-    // Only classification-level fields and the aggregate
-    // report leave this boundary. No screenshots, no OCR
-    // text, no detected PII values.
-    //
-    // ========================================================
-
-    const safeDetections =
-        sanitizeBenchmarkDetections(
-            response.detections
-        );
-
-    const safeReport =
-        sanitizeBenchmarkReport(
-            response.report
-        );
-
-
-    console.log(
-        `[BENCHMARK] Request ${requestId} completed`
-    );
-
-
-    return {
-
-        requestId,
-
-        success:
-            true,
-
-        detections:
-            safeDetections,
-
-        report:
-            safeReport
-    };
 }
-
-
-
 
 // ============================================================
 // MESSAGE LISTENER
@@ -2399,86 +1942,130 @@ chrome.runtime.onMessage.addListener(
         sender,
         sendResponse
     ) => {
+        const messageType =
+            message?.type;
 
         console.log(
             "[MESSAGE]",
-            message?.type
+            messageType
         );
 
-
-        // ====================================================
-        // CAPTURE + SANITIZE
-        // ====================================================
+        // ----------------------------
+        // Firefox face detection
+        // ----------------------------
 
         if (
-            message?.type ===
-            "CAPTURE_AND_SANITIZE"
+            messageType ===
+            "FIREFOX_FACE_DETECT"
         ) {
-
-            // ------------------------------------------------
-            // TRUST BOUNDARY
-            // ------------------------------------------------
-
             if (
                 !isTrustedExtensionSender(
                     sender
                 )
             ) {
-
-                console.warn(
-                    "[CAPTURE] Rejected request from an unexpected sender."
-                );
-
-
                 sendResponse({
-
-                    success:
-                        false,
-
+                    success: false,
                     error:
-                        "Unauthorized capture request."
+                        "Unauthorized face-detection request."
                 });
-
 
                 return false;
             }
 
+            if (
+                !IS_FIREFOX_BROWSER ||
+                !IS_EXTENSION_DOCUMENT_CONTEXT
+            ) {
+                sendResponse({
+                    success: false,
+                    error:
+                        "Firefox face bridge is unavailable in this context."
+                });
 
-            // ------------------------------------------------
-            // ASYNC CAPTURE
-            // ------------------------------------------------
+                return false;
+            }
+
+            runFirefoxFaceDetection(
+                message?.screenshot
+            )
+                .then(
+                    detections => {
+                        sendResponse({
+                            success: true,
+
+                            detections:
+                                Array.isArray(
+                                    detections
+                                )
+                                    ? detections
+                                    : []
+                        });
+                    }
+                )
+                .catch(
+                    error => {
+                        console.error(
+                            "[FACE] Firefox bridge error:",
+                            error?.message ||
+                            error
+                        );
+
+                        sendResponse({
+                            success: false,
+                            error:
+                                error?.message ||
+                                "Firefox face detection failed."
+                        });
+                    }
+                );
+
+            return true;
+        }
+
+        // ----------------------------
+        // Capture + sanitize
+        // ----------------------------
+
+        if (
+            messageType ===
+            "CAPTURE_AND_SANITIZE"
+        ) {
+            if (
+                !isTrustedExtensionSender(
+                    sender
+                )
+            ) {
+                sendResponse({
+                    success: false,
+                    error:
+                        "Unauthorized capture request."
+                });
+
+                return false;
+            }
 
             captureAndSanitize()
-
                 .then(
                     result => {
-
                         console.log(
                             "[CAPTURE] Capture + sanitize complete."
                         );
-
 
                         sendResponse(
                             result
                         );
                     }
                 )
-
                 .catch(
                     error => {
-
                         console.error(
                             "[CAPTURE] Pipeline error:",
                             error?.message ||
                             error
                         );
 
-
                         sendResponse({
-
-                            success:
-                                false,
-
+                            success: false,
                             error:
                                 error?.message ||
                                 "Capture pipeline failed."
@@ -2486,93 +2073,56 @@ chrome.runtime.onMessage.addListener(
                     }
                 );
 
-
-            // Keep the message channel open for
-            // the asynchronous response.
-
             return true;
         }
 
-
-        // ====================================================
-        // EXECUTE BROWSER ACTION
-        // ====================================================
+        // ----------------------------
+        // Browser action
+        // ----------------------------
 
         if (
-            message?.type ===
+            messageType ===
             "EXECUTE_BROWSER_ACTION"
         ) {
-
-            // ------------------------------------------------
-            // TRUST BOUNDARY
-            // ------------------------------------------------
-
             if (
                 !isTrustedExtensionSender(
                     sender
                 )
             ) {
-
-                console.warn(
-                    "[ACTION] Rejected request from an unexpected sender."
-                );
-
-
                 sendResponse({
-
-                    success:
-                        false,
-
+                    success: false,
                     error:
                         "Unauthorized action request."
                 });
 
-
                 return false;
             }
-
 
             console.log(
                 "[ACTION] EXECUTE_BROWSER_ACTION received:",
                 getSafeActionLog(
-                    message.action
+                    message?.action
                 )
             );
 
-
-            // ------------------------------------------------
-            // EXECUTE ASYNC
-            // ------------------------------------------------
-
             executeBrowserAction(
-                message.action
+                message?.action
             )
-
                 .then(
                     result => {
-
                         if (
                             result?.success === true
                         ) {
-
                             sendResponse({
-
-                                success:
-                                    true,
-
-                                result:
-                                    result
+                                success: true,
+                                result
                             });
-
 
                             return;
                         }
 
-
                         sendResponse({
-
-                            success:
-                                false,
+                            success: false,
 
                             error:
                                 result?.error ||
@@ -2580,22 +2130,16 @@ chrome.runtime.onMessage.addListener(
                         });
                     }
                 )
-
                 .catch(
                     error => {
-
                         console.error(
                             "[ACTION] Unexpected browser action error:",
                             error?.message ||
                             error
                         );
 
-
                         sendResponse({
-
-                            success:
-                                false,
-
+                            success: false,
                             error:
                                 error?.message ||
                                 "Browser action failed."
@@ -2603,203 +2147,128 @@ chrome.runtime.onMessage.addListener(
                     }
                 );
 
-
-            // Keep the message channel open for
-            // the asynchronous response.
-
             return true;
         }
 
-
-        // ====================================================
-        // BENCHMARK: RUN OCR BENCHMARK
-        // ====================================================
-        //
-        // Kept separate from CAPTURE_AND_SANITIZE so benchmark
-        // code can never accidentally weaken the production
-        // privacy boundary.
-        //
-        // ====================================================
+        // ----------------------------
+        // OCR benchmark
+        // ----------------------------
 
         if (
-            message?.type ===
+            messageType ===
             "RUN_OCR_BENCHMARK"
         ) {
-
-            // ------------------------------------------------
-            // BASIC MESSAGE SHAPE
-            // ------------------------------------------------
-
             if (
                 !message ||
                 typeof message !== "object"
             ) {
-
                 sendResponse({
-
-                    success:
-                        false,
-
+                    success: false,
                     error:
                         "Invalid benchmark request.",
-
                     code:
                         "INVALID_BENCHMARK_REQUEST",
-
-                    retryable:
-                        false
+                    retryable: false
                 });
 
                 return false;
             }
-
-
-            // ------------------------------------------------
-            // TRUST BOUNDARY
-            // ------------------------------------------------
 
             if (
                 !isTrustedExtensionSender(
                     sender
                 )
             ) {
-
-                console.warn(
-                    "[BENCHMARK] Rejected request from an unexpected sender."
-                );
-
                 sendResponse({
-
-                    success:
-                        false,
-
+                    success: false,
                     error:
                         "Unauthorized request.",
-
                     code:
                         "INVALID_BENCHMARK_REQUEST",
-
-                    retryable:
-                        false
+                    retryable: false
                 });
 
                 return false;
             }
-
-
-            // ------------------------------------------------
-            // PAYLOAD VALIDATION
-            // ------------------------------------------------
 
             const testCases =
-                Array.isArray(message.testCases)
+                Array.isArray(
+                    message.testCases
+                )
                     ? message.testCases
-                          .map(
-                              testCase =>
-                                  String(testCase || "")
-                                      .toUpperCase()
-                                      .trim()
-                          )
-                          .filter(
-                              testCase =>
-                                  ALLOWED_BENCHMARK_TYPES.has(
-                                      testCase
-                                  )
-                          )
+                        .map(
+                            testCase =>
+                                String(
+                                    testCase || ""
+                                )
+                                    .toUpperCase()
+                                    .trim()
+                        )
+                        .filter(
+                            testCase =>
+                                ALLOWED_BENCHMARK_TYPES.has(
+                                    testCase
+                                )
+                        )
                     : [];
 
-
-            if (testCases.length === 0) {
-
+            if (
+                testCases.length === 0
+            ) {
                 sendResponse({
-
-                    success:
-                        false,
-
+                    success: false,
                     error:
                         "No benchmark test cases supplied.",
-
                     code:
                         "INVALID_BENCHMARK_REQUEST",
-
-                    retryable:
-                        false
+                    retryable: false
                 });
 
                 return false;
             }
 
-
             const requestId =
-                crypto.randomUUID();
-
-
-            console.log(
-                "[BENCHMARK] OCR test started"
-            );
-
-            console.log(
-                `[BENCHMARK] Request ${requestId}`,
-                `testCases=${testCases.length}`
-            );
-
-
-            // ------------------------------------------------
-            // EXECUTE ASYNC
-            // ------------------------------------------------
-
-            benchmarkStats.runs += 1;
+                createRequestId(
+                    "ocr"
+                );
 
             const benchmarkStart =
                 Date.now();
 
+            benchmarkStats.runs += 1;
 
             runOCRBenchmark(
                 requestId,
                 testCases
             )
-
                 .then(
                     result => {
-
                         benchmarkStats.successful += 1;
 
                         benchmarkStats.totalLatencyMs +=
-                            Date.now() - benchmarkStart;
-
+                            Date.now() -
+                            benchmarkStart;
 
                         result.detections?.forEach(
                             detection => {
-
                                 console.log(
-                                    `[BENCHMARK] Test case: ${detection.type}`
-                                );
-
-                                console.log(
-                                    `[BENCHMARK] Detected: ${detection.detected}`
-                                );
-
-                                console.log(
-                                    `[BENCHMARK] Confidence: ${detection.confidence}`
+                                    `[BENCHMARK] ${detection.type}: detected=${detection.detected} confidence=${detection.confidence}`
                                 );
                             }
                         );
-
 
                         sendResponse(
                             result
                         );
                     }
                 )
-
                 .catch(
                     error => {
-
                         benchmarkStats.failed += 1;
 
                         benchmarkStats.totalLatencyMs +=
-                            Date.now() - benchmarkStart;
-
+                            Date.now() -
+                            benchmarkStart;
 
                         console.error(
                             "[BENCHMARK] Pipeline error:",
@@ -2807,13 +2276,10 @@ chrome.runtime.onMessage.addListener(
                             error
                         );
 
-
                         sendResponse({
-
                             requestId,
 
-                            success:
-                                false,
+                            success: false,
 
                             error:
                                 error?.message ||
@@ -2821,32 +2287,35 @@ chrome.runtime.onMessage.addListener(
 
                             code:
                                 error?.code ||
-                                "OCR_BENCHMARK_FAILED",
+                                (
+                                    String(
+                                        error?.message ||
+                                        ""
+                                    ).includes(
+                                        "timed out"
+                                    )
+                                        ? "OCR_TIMEOUT"
+                                        : "OCR_BENCHMARK_FAILED"
+                                ),
 
                             retryable:
-                                error?.code === "OCR_TIMEOUT" ||
-                                error?.code === "CONTENT_SCRIPT_UNAVAILABLE"
+                                String(
+                                    error?.message ||
+                                    ""
+                                ).includes(
+                                    "timed out"
+                                )
                         });
                     }
                 );
 
-
-            // Keep the message channel open for
-            // the asynchronous response.
-
             return true;
         }
 
-
-        // ====================================================
-        // UNKNOWN MESSAGE
-        // ====================================================
-
         console.warn(
             "[MESSAGE] Unknown background message:",
-            message?.type
+            messageType
         );
-
 
         return false;
     }

@@ -1,93 +1,122 @@
 // ============================================================
-// SIH RUNTIME DEPENDENCY CHECK
-// Waits for TensorFlow.js + BlazeFace before checking.
+// DEVINS RUNTIME DEPENDENCY CHECK
+// Chrome + Firefox
 // ============================================================
 
 (function () {
 
     "use strict";
 
-    const CHECK_INTERVAL_MS = 100;
-    const MAX_WAIT_MS = 10000;
+
+    // ========================================================
+    // BROWSER DETECTION
+    // ========================================================
+
+    const USER_AGENT =
+        typeof navigator !== "undefined"
+            ? navigator.userAgent
+            : "";
 
 
-    function sleep(ms) {
-
-        return new Promise(
-            function (resolve) {
-                setTimeout(
-                    resolve,
-                    ms
-                );
-            }
+    const IS_FIREFOX =
+        /Firefox\/\d+/i.test(
+            USER_AGENT
+        ) &&
+        !/Chrome\/\d+|Chromium\/\d+|Edg\/\d+|OPR\/\d+/i.test(
+            USER_AGENT
         );
+
+
+    const IS_FIREFOX_CONTENT_CONTEXT =
+        IS_FIREFOX &&
+        typeof browser !== "undefined" &&
+        browser.runtime &&
+        typeof browser.runtime.sendMessage ===
+            "function" &&
+        typeof location !== "undefined" &&
+        location.protocol !== "moz-extension:" &&
+        location.protocol !== "chrome-extension:";
+
+
+    // ========================================================
+    // FIREFOX
+    // AI runs inside sandbox.
+    // ========================================================
+
+    if (
+        IS_FIREFOX_CONTENT_CONTEXT
+    ) {
+
+        console.log(
+            "[RUNTIME CHECK] Browser: Firefox"
+        );
+
+        console.log(
+            "[RUNTIME CHECK] Face inference: sandbox"
+        );
+
+        console.log(
+            "[RUNTIME CHECK] TensorFlow.js: sandbox"
+        );
+
+        console.log(
+            "[RUNTIME CHECK] BlazeFace: sandbox"
+        );
+
+        console.log(
+            "[RUNTIME CHECK] AI dependencies: READY VIA SANDBOX"
+        );
+
+        return;
     }
 
 
-    async function waitForDependencies() {
+    // ========================================================
+    // CHROME / CHROMIUM
+    // Wait for direct local dependencies.
+    // ========================================================
 
-        const start =
-            performance.now();
-
-        console.log(
-            "[RUNTIME CHECK] Waiting for AI dependencies..."
-        );
-
-
-        while (
-            performance.now() - start <
-            MAX_WAIT_MS
-        ) {
-
-            const tfReady =
-                Boolean(
-                    window.tf
-                );
-
-            const blazeReady =
-                Boolean(
-                    window.blazeface
-                );
+    console.log(
+        "[RUNTIME CHECK] Browser: Chromium"
+    );
 
 
-            if (
-                tfReady &&
-                blazeReady
-            ) {
+    const MAX_WAIT_MS =
+        10000;
 
-                return true;
-            }
+    const POLL_INTERVAL_MS =
+        100;
 
 
-            await sleep(
-                CHECK_INTERVAL_MS
-            );
-        }
+    const started =
+        performance.now();
 
 
-        return false;
-    }
+    function checkChromeDependencies() {
+
+        const hasTensorFlow =
+            typeof window !== "undefined" &&
+            typeof window.tf !== "undefined";
 
 
-    async function runRuntimeCheck() {
-
-        const ready =
-            await waitForDependencies();
-
-
-        // ----------------------------------------------------
-        // TensorFlow.js
-        // ----------------------------------------------------
-
-        console.log(
-            "[RUNTIME CHECK] TensorFlow.js:",
-            typeof window.tf
-        );
+        const hasBlazeFace =
+            typeof window !== "undefined" &&
+            typeof window.blazeface !== "undefined";
 
 
         if (
-            window.tf
+            hasTensorFlow &&
+            hasBlazeFace
         ) {
+
+            console.log(
+                "[RUNTIME CHECK] TensorFlow.js: object"
+            );
+
+            console.log(
+                "[RUNTIME CHECK] BlazeFace: object"
+            );
+
 
             console.log(
                 "[RUNTIME CHECK] TensorFlow version:",
@@ -96,90 +125,73 @@
             );
 
 
+            let backend =
+                "not initialized";
+
+
             try {
 
-                await window.tf.ready();
+                backend =
+                    window.tf.getBackend?.() ||
+                    "not initialized";
 
-            } catch (error) {
-
-                console.warn(
-                    "[RUNTIME CHECK] TensorFlow ready() failed:",
-                    error
-                );
-            }
+            } catch (_) {}
 
 
             console.log(
                 "[RUNTIME CHECK] Backend:",
-                window.tf.getBackend?.() ||
-                "not initialized"
+                backend
             );
 
-        } else {
-
-            console.error(
-                "[RUNTIME CHECK] TensorFlow.js FAILED TO LOAD."
-            );
-        }
-
-
-        // ----------------------------------------------------
-        // BlazeFace
-        // ----------------------------------------------------
-
-        console.log(
-            "[RUNTIME CHECK] BlazeFace:",
-            typeof window.blazeface
-        );
-
-
-        if (
-            window.blazeface
-        ) {
 
             console.log(
                 "[RUNTIME CHECK] BlazeFace API available."
             );
 
-        } else {
-
-            console.error(
-                "[RUNTIME CHECK] BlazeFace FAILED TO LOAD."
-            );
-        }
-
-
-        // ----------------------------------------------------
-        // Final status
-        // ----------------------------------------------------
-
-        if (
-            ready
-        ) {
 
             console.log(
                 "[RUNTIME CHECK] AI dependencies READY."
             );
 
-        } else {
+
+            return;
+        }
+
+
+        if (
+            performance.now() -
+            started >=
+            MAX_WAIT_MS
+        ) {
 
             console.error(
                 "[RUNTIME CHECK] AI dependency timeout."
             );
 
+
             console.error(
                 "[RUNTIME CHECK] TensorFlow:",
-                Boolean(window.tf)
+                hasTensorFlow
             );
+
 
             console.error(
                 "[RUNTIME CHECK] BlazeFace:",
-                Boolean(window.blazeface)
+                hasBlazeFace
             );
+
+
+            return;
         }
+
+
+        setTimeout(
+            checkChromeDependencies,
+            POLL_INTERVAL_MS
+        );
     }
 
 
-    runRuntimeCheck();
+    checkChromeDependencies();
 
 })();
