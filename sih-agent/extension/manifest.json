@@ -14,10 +14,23 @@
   "host_permissions": [
     "<all_urls>",
     "https://devins.onrender.com/*"
-],
+  ],
 
   "background": {
+    "scripts": ["background.js"],
     "service_worker": "background.js"
+  },
+
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "@devins-privacy-agent",
+      "data_collection_permissions": {
+        "required": [
+          "websiteActivity",
+          "websiteContent"
+        ]
+      }
+    }
   },
 
   "action": {
@@ -32,21 +45,21 @@
     "128": "assets/devins-128.png"
   },
 
-"content_scripts": [
-  {
-    "matches": ["<all_urls>"],
-    "js": [
-    "tesseract.min.js",
-    "ocr.js",
-    "tensorflow.min.js",
-    "runtime-check.js",
-    "blazeface.min.js",
-    "face.js",
-    "perception.js",
-    "fusion.js",
-    "content.js"
-],
-    "run_at": "document_idle"
-  }
-]
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": [
+        "tesseract.min.js",
+        "ocr.js",
+        "tensorflow.min.js",
+        "runtime-check.js",
+        "blazeface.min.js",
+        "face.js",
+        "perception.js",
+        "fusion.js",
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
 }
