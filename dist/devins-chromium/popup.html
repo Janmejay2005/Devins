@@ -1,0 +1,1377 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+
+    <title>Devins — Privacy Browser Agent</title>
+
+    <style>
+        /* =========================================================
+           DEVINS — PRIVACY BROWSER AGENT
+           Human-designed extension interface
+           ========================================================= */
+
+        * {
+            box-sizing: border-box;
+        }
+
+        :root {
+            --bg: #f7f8f6;
+            --surface: #ffffff;
+            --surface-soft: #f3f6f3;
+
+            --ink: #101827;
+            --muted: #667085;
+            --muted-2: #8a94a6;
+
+            --border: #e2e7e3;
+            --border-dark: #d5ddd8;
+
+            --green: #087f5b;
+            --green-dark: #075c43;
+            --green-soft: #eaf7f1;
+
+            --blue: #2563eb;
+            --blue-soft: #eff6ff;
+
+            --red: #dc2626;
+            --red-soft: #fef2f2;
+
+            --shadow:
+                0 2px 8px rgba(15, 23, 42, 0.04),
+                0 10px 30px rgba(15, 23, 42, 0.035);
+
+            --radius: 16px;
+        }
+
+        html {
+            width: 100%;
+            min-width: 520px;
+        }
+
+        body {
+            width: 520px;
+            min-height: 600px;
+            max-height: 760px;
+
+            margin: 0;
+
+            background: var(--bg);
+            color: var(--ink);
+
+            font-family:
+                Inter,
+                ui-sans-serif,
+                -apple-system,
+                BlinkMacSystemFont,
+                "Segoe UI",
+                Roboto,
+                Arial,
+                sans-serif;
+
+            overflow-y: auto;
+            overflow-x: hidden;
+
+            -webkit-font-smoothing: antialiased;
+        }
+
+        button,
+        textarea {
+            font: inherit;
+        }
+
+        button {
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        /* =========================================================
+           SCROLLBAR
+           ========================================================= */
+
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: #cfd7d2;
+            border-radius: 20px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: #b8c3bd;
+        }
+
+        /* =========================================================
+           TOP BAR
+           ========================================================= */
+
+        .topbar {
+            height: 78px;
+
+            padding: 16px 22px;
+
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+
+            background: rgba(255, 255, 255, 0.96);
+
+            border-bottom: 1px solid var(--border);
+
+            position: sticky;
+            top: 0;
+            z-index: 20;
+
+            backdrop-filter: blur(12px);
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 11px;
+        }
+
+        /* Curved Devins D */
+
+        .devins-mark {
+            width: 38px;
+            height: 38px;
+
+            position: relative;
+
+            display: flex;
+            align-items: center;
+            justify-content: center;
+
+            flex-shrink: 0;
+        }
+
+        .devins-mark::before {
+            content: "";
+
+            width: 31px;
+            height: 31px;
+
+            border: 8px solid #0b1828;
+            border-left-color: transparent;
+
+            border-radius: 5px 18px 18px 5px;
+
+            transform: skewY(-1deg);
+
+            position: absolute;
+        }
+
+        .devins-mark::after {
+            content: "";
+
+            width: 8px;
+            height: 26px;
+
+            background:
+                linear-gradient(
+                    180deg,
+                    #20a477 0%,
+                    #087f5b 100%
+                );
+
+            border-radius: 7px 2px 2px 7px;
+
+            position: absolute;
+            left: 5px;
+            top: 6px;
+
+            transform: skewY(-18deg);
+        }
+
+        .brand-name {
+            font-size: 23px;
+            line-height: 1;
+
+            font-weight: 750;
+            letter-spacing: -0.7px;
+        }
+
+        .brand-subtitle {
+            margin-top: 4px;
+
+            font-size: 11px;
+
+            color: var(--muted);
+
+            letter-spacing: 0.15px;
+        }
+
+        .protection-status {
+            display: flex;
+            align-items: center;
+            gap: 9px;
+
+            padding: 8px 12px;
+
+            border: 1px solid #cce8da;
+
+            background: var(--green-soft);
+
+            border-radius: 12px;
+        }
+
+        .status-dot {
+            width: 9px;
+            height: 9px;
+
+            border-radius: 50%;
+
+            background: #0c9a68;
+
+            box-shadow:
+                0 0 0 4px rgba(12, 154, 104, 0.08);
+        }
+
+        .status-copy strong {
+            display: block;
+
+            font-size: 12px;
+            font-weight: 700;
+
+            color: var(--green-dark);
+        }
+
+        .status-copy span {
+            display: block;
+
+            margin-top: 2px;
+
+            font-size: 10px;
+
+            color: #4c7768;
+        }
+
+        /* =========================================================
+           PAGE
+           ========================================================= */
+
+        .page {
+            padding: 18px 20px 26px;
+        }
+
+        /* =========================================================
+           HERO / TASK CARD
+           ========================================================= */
+
+        .task-card {
+            background: var(--surface);
+
+            border: 1px solid var(--border);
+
+            border-radius: 18px;
+
+            padding: 20px;
+
+            box-shadow: var(--shadow);
+        }
+
+        .eyebrow {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+
+            color: var(--green);
+
+            font-size: 11px;
+            font-weight: 750;
+
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+        }
+
+        .eyebrow-line {
+            width: 22px;
+            height: 2px;
+
+            background: var(--green);
+
+            border-radius: 10px;
+        }
+
+        .task-title {
+            margin: 9px 0 5px;
+
+            font-size: 24px;
+            line-height: 1.15;
+
+            font-weight: 750;
+
+            letter-spacing: -0.7px;
+        }
+
+        .task-description {
+            margin: 0 0 16px;
+
+            color: var(--muted);
+
+            font-size: 13px;
+            line-height: 1.5;
+        }
+
+        .task-editor {
+            position: relative;
+        }
+
+        .task-input {
+            width: 100%;
+
+            min-height: 92px;
+
+            resize: vertical;
+
+            padding: 14px 15px 27px;
+
+            border: 1px solid #ccd5cf;
+
+            border-radius: 12px;
+
+            outline: none;
+
+            background: #fcfdfc;
+
+            color: var(--ink);
+
+            font-size: 14px;
+            line-height: 1.5;
+
+            transition:
+                border-color 0.15s ease,
+                box-shadow 0.15s ease,
+                background 0.15s ease;
+        }
+
+        .task-input:hover {
+            border-color: #b8c4bd;
+        }
+
+        .task-input:focus {
+            border-color: #76ad98;
+
+            background: #ffffff;
+
+            box-shadow:
+                0 0 0 3px
+                rgba(8, 127, 91, 0.08);
+        }
+
+        .task-counter {
+            position: absolute;
+
+            right: 12px;
+            bottom: 8px;
+
+            font-size: 10px;
+
+            color: var(--muted-2);
+
+            pointer-events: none;
+        }
+
+        .task-footer {
+            margin-top: 12px;
+
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+
+            gap: 12px;
+        }
+
+        .task-hint {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+
+            color: var(--muted);
+
+            font-size: 11px;
+        }
+
+        .shield-mini {
+            width: 18px;
+            height: 18px;
+
+            display: grid;
+            place-items: center;
+
+            color: var(--green);
+
+            background: var(--green-soft);
+
+            border-radius: 6px;
+
+            font-size: 10px;
+            font-weight: 800;
+        }
+
+        /* =========================================================
+           RUN BUTTON
+           ========================================================= */
+
+        .capture-button {
+            min-width: 168px;
+
+            padding: 12px 18px;
+
+            border: 0;
+
+            border-radius: 10px;
+
+            background:
+                linear-gradient(
+                    135deg,
+                    #087f5b,
+                    #096b50
+                );
+
+            color: #ffffff;
+
+            font-size: 13px;
+            font-weight: 750;
+
+            cursor: pointer;
+
+            box-shadow:
+                0 4px 10px
+                rgba(8, 127, 91, 0.16);
+
+            transition:
+                transform 0.12s ease,
+                box-shadow 0.15s ease,
+                filter 0.15s ease;
+        }
+
+        .capture-button:hover {
+            filter: brightness(1.035);
+
+            box-shadow:
+                0 6px 14px
+                rgba(8, 127, 91, 0.20);
+        }
+
+        .capture-button:active {
+            transform: translateY(1px);
+        }
+
+        .capture-button:disabled {
+            cursor: wait;
+
+            filter: grayscale(0.15);
+
+            opacity: 0.75;
+        }
+
+        /* =========================================================
+           EXAMPLES
+           ========================================================= */
+
+        .examples {
+            margin-top: 13px;
+
+            display: flex;
+            align-items: center;
+            gap: 7px;
+
+            flex-wrap: wrap;
+        }
+
+        .examples-label {
+            margin-right: 2px;
+
+            color: var(--muted);
+
+            font-size: 10px;
+            font-weight: 650;
+        }
+
+        .quick-task {
+            padding: 7px 10px;
+
+            border: 1px solid #dfe5e1;
+
+            border-radius: 8px;
+
+            background: #fafcfb;
+
+            color: #354052;
+
+            font-size: 10px;
+
+            cursor: pointer;
+
+            transition:
+                background 0.15s ease,
+                border-color 0.15s ease,
+                transform 0.1s ease;
+        }
+
+        .quick-task:hover {
+            background: #f1f7f4;
+
+            border-color: #c8dcd2;
+        }
+
+        .quick-task:active {
+            transform: translateY(1px);
+        }
+
+        /* =========================================================
+           PRIVACY STRIP
+           ========================================================= */
+
+        .privacy-strip {
+            margin-top: 14px;
+
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+
+            gap: 15px;
+
+            padding: 13px 15px;
+
+            border: 1px solid #d8e9e1;
+
+            border-radius: 13px;
+
+            background:
+                linear-gradient(
+                    90deg,
+                    #f2faf6,
+                    #fbfdfc
+                );
+        }
+
+        .privacy-main {
+            display: flex;
+            align-items: center;
+            gap: 11px;
+        }
+
+        .privacy-icon {
+            width: 31px;
+            height: 31px;
+
+            display: grid;
+            place-items: center;
+
+            flex-shrink: 0;
+
+            border-radius: 9px;
+
+            background: #dff2e9;
+
+            color: var(--green);
+
+            font-size: 15px;
+        }
+
+        .privacy-main strong {
+            display: block;
+
+            font-size: 12px;
+        }
+
+        .privacy-main span {
+            display: block;
+
+            margin-top: 2px;
+
+            font-size: 10px;
+
+            color: var(--muted);
+        }
+
+        .local-pill {
+            padding: 7px 10px;
+
+            border-radius: 20px;
+
+            background: #e6f5ee;
+
+            color: var(--green-dark);
+
+            font-size: 10px;
+            font-weight: 700;
+
+            white-space: nowrap;
+        }
+
+        /* =========================================================
+           SECTION GRID
+           ========================================================= */
+
+        .section-grid {
+            display: grid;
+
+            grid-template-columns:
+                minmax(0, 1.15fr)
+                minmax(0, 0.85fr);
+
+            gap: 14px;
+
+            margin-top: 14px;
+        }
+
+        .panel {
+            min-width: 0;
+
+            background: var(--surface);
+
+            border: 1px solid var(--border);
+
+            border-radius: var(--radius);
+
+            box-shadow: var(--shadow);
+
+            overflow: hidden;
+        }
+
+        .panel-header {
+            min-height: 52px;
+
+            padding: 13px 15px;
+
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+
+            border-bottom: 1px solid #edf0ee;
+        }
+
+        .panel-title {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+
+            font-size: 13px;
+            font-weight: 750;
+        }
+
+        .panel-icon {
+            width: 25px;
+            height: 25px;
+
+            display: grid;
+            place-items: center;
+
+            border-radius: 7px;
+
+            background: #f1f5f3;
+
+            color: var(--green);
+
+            font-size: 12px;
+        }
+
+        .panel-body {
+            padding: 14px 15px;
+        }
+
+        .panel-badge {
+            padding: 5px 8px;
+
+            border-radius: 20px;
+
+            background: var(--green-soft);
+
+            color: var(--green-dark);
+
+            font-size: 9px;
+            font-weight: 750;
+        }
+
+        /* =========================================================
+           AGENT ACTIVITY
+           ========================================================= */
+
+        .activity {
+            position: relative;
+
+            padding-left: 22px;
+        }
+
+        .activity::before {
+            content: "";
+
+            position: absolute;
+
+            left: 6px;
+            top: 5px;
+            bottom: 5px;
+
+            width: 1px;
+
+            background: #dbe4df;
+        }
+
+        .activity-item {
+            position: relative;
+
+            padding: 0 0 14px;
+        }
+
+        .activity-item:last-child {
+            padding-bottom: 0;
+        }
+
+        .activity-dot {
+            position: absolute;
+
+            left: -22px;
+            top: 2px;
+
+            width: 13px;
+            height: 13px;
+
+            border: 2px solid #ffffff;
+
+            border-radius: 50%;
+
+            background: #9aa8a1;
+
+            box-shadow:
+                0 0 0 1px #d5ded9;
+        }
+
+        .activity-item.success .activity-dot {
+            background: #0b9565;
+
+            box-shadow:
+                0 0 0 1px #bce1d0;
+        }
+
+        .activity-item.active .activity-dot {
+            background: #2563eb;
+
+            box-shadow:
+                0 0 0 4px #e5edff;
+        }
+
+        .activity-title {
+            font-size: 11px;
+            font-weight: 750;
+        }
+
+        .activity-description {
+            margin-top: 3px;
+
+            color: var(--muted);
+
+            font-size: 9.5px;
+
+            line-height: 1.4;
+        }
+
+        .activity-time {
+            margin-top: 4px;
+
+            color: var(--muted-2);
+
+            font-size: 9px;
+        }
+
+        /* =========================================================
+           METRICS
+           ========================================================= */
+
+        .metrics {
+            display: grid;
+
+            grid-template-columns:
+                repeat(3, 1fr);
+
+            gap: 7px;
+
+            margin-top: 15px;
+        }
+
+        .metric {
+            padding: 10px;
+
+            border: 1px solid #e8ece9;
+
+            border-radius: 10px;
+
+            background: #fafbfa;
+        }
+
+        .metric-label {
+            color: var(--muted);
+
+            font-size: 8px;
+
+            text-transform: uppercase;
+
+            letter-spacing: 0.5px;
+        }
+
+        .metric-value {
+            margin-top: 4px;
+
+            font-size: 14px;
+
+            font-weight: 750;
+        }
+
+        /* =========================================================
+           PRIVACY AUDIT
+           ========================================================= */
+
+        .audit-list {
+            display: flex;
+
+            flex-direction: column;
+
+            gap: 9px;
+        }
+
+        .audit-row {
+            display: grid;
+
+            grid-template-columns:
+                minmax(0, 1fr)
+                auto
+                17px;
+
+            align-items: center;
+
+            gap: 8px;
+
+            font-size: 10px;
+        }
+
+        .audit-label {
+            color: #3f4b5a;
+        }
+
+        .audit-value {
+            color: var(--green-dark);
+
+            font-weight: 650;
+
+            text-align: right;
+        }
+
+        .audit-check {
+            width: 15px;
+            height: 15px;
+
+            display: grid;
+            place-items: center;
+
+            border-radius: 50%;
+
+            background: #e3f6ed;
+
+            color: #087f5b;
+
+            font-size: 8px;
+            font-weight: 800;
+        }
+
+        .audit-pass {
+            margin-top: 14px;
+
+            padding: 11px;
+
+            border: 1px solid #d3eadf;
+
+            border-radius: 10px;
+
+            background: #f1faf5;
+        }
+
+        .audit-pass-title {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+
+            color: var(--green-dark);
+
+            font-size: 10px;
+            font-weight: 750;
+        }
+
+        .audit-pass-description {
+            margin-top: 5px;
+
+            color: #5a7268;
+
+            font-size: 9px;
+            line-height: 1.4;
+        }
+
+        /* =========================================================
+           PREVIEW PANELS
+           ========================================================= */
+
+        .preview-panel {
+            margin-top: 14px;
+        }
+
+        .preview-body {
+            padding: 11px;
+        }
+
+        .preview {
+            display: block;
+
+            width: 100%;
+
+            max-height: 250px;
+
+            object-fit: contain;
+
+            border: 1px solid #dce3df;
+
+            border-radius: 9px;
+
+            background: #f1f4f2;
+        }
+
+        .preview-caption {
+            margin-top: 7px;
+
+            color: var(--muted);
+
+            font-size: 9px;
+
+            line-height: 1.4;
+        }
+
+        /* =========================================================
+           DETECTION BADGES
+           ========================================================= */
+
+        .detection-summary {
+            display: flex;
+
+            align-items: center;
+
+            justify-content: space-between;
+
+            gap: 10px;
+
+            margin-bottom: 10px;
+        }
+
+        .detection-count {
+            font-size: 11px;
+            font-weight: 750;
+        }
+
+        .detection-state {
+            padding: 5px 8px;
+
+            border-radius: 20px;
+
+            background: #fff3f2;
+
+            color: #b42318;
+
+            font-size: 8px;
+            font-weight: 750;
+        }
+
+        /* =========================================================
+           RESULT
+           ========================================================= */
+
+        .result {
+            margin-top: 14px;
+
+            padding: 0;
+
+            background: transparent;
+
+            border: 0;
+
+            font-size: 11px;
+
+            line-height: 1.5;
+        }
+
+        .result-title {
+            padding: 13px 15px;
+
+            border-bottom: 1px solid #edf0ee;
+
+            font-size: 14px;
+
+            font-weight: 750;
+        }
+
+        .result-content {
+            padding: 15px;
+        }
+
+        .result-title.success {
+            color: var(--green-dark);
+        }
+
+        .result-title.error {
+            color: var(--red);
+        }
+
+        .row {
+            margin: 7px 0;
+        }
+
+        .label {
+            font-weight: 700;
+        }
+
+        .success {
+            color: var(--green);
+
+            font-weight: 650;
+        }
+
+        .error {
+            color: var(--red);
+
+            font-weight: 650;
+        }
+
+        .privacy-badge {
+            display: inline-flex;
+
+            align-items: center;
+
+            padding: 6px 9px;
+
+            margin-bottom: 11px;
+
+            border-radius: 20px;
+
+            background: var(--green-soft);
+
+            color: var(--green-dark);
+
+            font-size: 9px;
+
+            font-weight: 750;
+
+            letter-spacing: 0.2px;
+        }
+
+        .result .preview {
+            margin-top: 12px;
+        }
+
+        .small {
+            margin-top: 8px;
+
+            color: var(--muted);
+
+            font-size: 9px;
+
+            line-height: 1.45;
+        }
+
+        /* =========================================================
+           FOOTER
+           ========================================================= */
+
+        .footer {
+            margin-top: 16px;
+
+            padding: 10px 3px 0;
+
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+
+            color: var(--muted-2);
+
+            font-size: 9px;
+        }
+
+        .footer-brand {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+
+            color: #344054;
+
+            font-weight: 700;
+        }
+
+        .footer-mark {
+            width: 15px;
+            height: 15px;
+
+            border: 4px solid #0b1828;
+            border-left-color: transparent;
+
+            border-radius: 4px 9px 9px 4px;
+        }
+
+        /* =========================================================
+           LOADING
+           ========================================================= */
+
+        .loading {
+            display: inline-block;
+
+            width: 13px;
+            height: 13px;
+
+            margin-right: 7px;
+
+            vertical-align: -2px;
+
+            border: 2px solid rgba(255,255,255,0.35);
+
+            border-top-color: #ffffff;
+
+            border-radius: 50%;
+
+            animation:
+                devins-spin
+                0.75s linear infinite;
+        }
+
+        @keyframes devins-spin {
+            from {
+                transform: rotate(0deg);
+            }
+
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        /* =========================================================
+           RESPONSIVE
+           ========================================================= */
+
+        @media (max-width: 735px) {
+            html {
+                min-width: 520px;
+            }
+
+            body {
+                width: 520px;
+            }
+
+            .section-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .task-footer {
+                align-items: stretch;
+                flex-direction: column;
+            }
+
+            .capture-button {
+                width: 100%;
+            }
+
+            .protection-status {
+                display: none;
+            }
+        }
+    </style>
+</head>
+
+<body>
+
+    <!-- =========================================================
+         TOP BAR
+         ========================================================= -->
+
+    <header class="topbar">
+
+        <div class="brand">
+
+            <div
+                class="devins-mark"
+                aria-label="Devins logo"
+            ></div>
+
+            <div>
+                <div class="brand-name">
+                    Devins
+                </div>
+
+                <div class="brand-subtitle">
+                    Privacy Browser Agent
+                </div>
+            </div>
+
+        </div>
+
+        <div class="protection-status">
+
+            <span class="status-dot"></span>
+
+            <div class="status-copy">
+                <strong>Active</strong>
+                <span>On-device protection enabled</span>
+            </div>
+
+        </div>
+
+    </header>
+
+
+    <!-- =========================================================
+         PAGE
+         ========================================================= -->
+
+    <main class="page">
+
+        <!-- =====================================================
+             TASK
+             ===================================================== -->
+
+        <section class="task-card">
+
+            <div class="eyebrow">
+                <span class="eyebrow-line"></span>
+                PRIVATE AGENT
+            </div>
+
+            <h1 class="task-title">
+                What should I do on this page?
+            </h1>
+
+            <p class="task-description">
+                Describe your task naturally. Devins will
+                perceive the page, protect sensitive information,
+                and perform the requested browser actions.
+            </p>
+
+
+            <div class="task-editor">
+
+                <textarea
+                    id="taskInput"
+                    class="task-input"
+                    maxlength="500"
+                    placeholder='Example: Fill the Full Name field with "Amit Kumar" and submit the form'
+                    spellcheck="false"
+                ></textarea>
+
+                <div class="task-counter">
+                    0 / 500
+                </div>
+
+            </div>
+
+
+            <div class="task-footer">
+
+                <div class="task-hint">
+
+                    <span class="shield-mini">
+                        ✓
+                    </span>
+
+                    Sensitive values are never read from
+                    the webpage.
+
+                </div>
+
+
+                <button
+                    id="captureButton"
+                    class="capture-button"
+                    type="button"
+                >
+                    ▶&nbsp; Run Agent
+                </button>
+
+            </div>
+        <!-- =====================================================
+             RESULT
+             ===================================================== -->
+
+        <section
+            id="result"
+            class="panel result hidden"
+        >
+
+            <div
+                id="resultTitle"
+                class="result-title"
+            ></div>
+
+            <div
+                id="resultContent"
+                class="result-content"
+            ></div>
+
+        </section>
+
+
+        <!-- =====================================================
+             DEFAULT AGENT / PRIVACY INFORMATION
+             ===================================================== -->
+
+        <div
+            id="agentOverview"
+            class="section-grid"
+        >
+
+            
+        <!-- =====================================================
+             FOOTER
+             ===================================================== -->
+
+        <footer class="footer">
+
+            <div class="footer-brand">
+
+                <span class="footer-mark"></span>
+
+                Devins
+
+                <span
+                    style="
+                        font-weight:400;
+                        color:#9aa4af;
+                    "
+                >
+                    Safer browsing with AI
+                </span>
+
+            </div>
+
+
+            <div>
+                On-device privacy • v1.0.0
+            </div>
+
+        </footer>
+
+    </main>
+
+
+    <!-- =========================================================
+         SCRIPT
+         ========================================================= -->
+
+    <script
+    defer
+    src="popup.js"
+></script>
+</body>
+</html>

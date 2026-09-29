@@ -1,0 +1,56 @@
+{
+  "manifest_version": 3,
+  "name": "SIH Privacy Browser Agent",
+  "version": "0.1.0",
+  "description": "Privacy-preserving on-device visual perception for browser agents.",
+  "permissions": [
+    "activeTab",
+    "tabs"
+  ],
+  "host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "sandbox": {
+    "pages": [
+      "sandbox.html"
+    ]
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'",
+    "sandbox": "sandbox allow-scripts; script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval'"
+  },
+  "action": {
+    "default_title": "Devins Privacy Browser Agent",
+    "default_popup": "popup.html"
+  },
+  "icons": {
+    "16": "assets/devins-16.png",
+    "32": "assets/devins-32.png",
+    "48": "assets/devins-48.png",
+    "128": "assets/devins-128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "tesseract.min.js",
+        "ocr.js",
+        "tensorflow.min.js",
+        "runtime-check.js",
+        "blazeface.min.js",
+        "face.js",
+        "perception.js",
+        "fusion.js",
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}
