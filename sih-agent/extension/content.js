@@ -2701,7 +2701,9 @@ function countUnredactedRegions(
 function getImageRegionForFace(
     faceRect,
     viewportWidth,
-    viewportHeight
+    viewportHeight,
+    canvasWidth,
+    canvasHeight
 ) {
 
     if (
@@ -2711,20 +2713,67 @@ function getImageRegionForFace(
         return null;
     }
 
+    // Face detector coordinates are screenshot/canvas pixels.
+    // DOM image rectangles are CSS viewport pixels.
+    // Convert face coordinates back to CSS viewport space.
+    const pixelToCssX =
+        canvasWidth > 0
+            ? viewportWidth / canvasWidth
+            : 1;
+
+    const pixelToCssY =
+        canvasHeight > 0
+            ? viewportHeight / canvasHeight
+            : 1;
+
+    const cssFaceRect = {
+
+        left:
+            faceRect.left *
+            pixelToCssX,
+
+        top:
+            faceRect.top *
+            pixelToCssY,
+
+        right:
+            faceRect.right *
+            pixelToCssX,
+
+        bottom:
+            faceRect.bottom *
+            pixelToCssY
+    };
+
     const faceCenterX =
-        (faceRect.left + faceRect.right) / 2;
+        (
+            cssFaceRect.left +
+            cssFaceRect.right
+        ) / 2;
 
     const faceCenterY =
-        (faceRect.top + faceRect.bottom) / 2;
+        (
+            cssFaceRect.top +
+            cssFaceRect.bottom
+        ) / 2;
 
     const faceWidth =
-        Math.max(1, faceRect.right - faceRect.left);
+        Math.max(
+            1,
+            cssFaceRect.right -
+            cssFaceRect.left
+        );
 
     const faceHeight =
-        Math.max(1, faceRect.bottom - faceRect.top);
+        Math.max(
+            1,
+            cssFaceRect.bottom -
+            cssFaceRect.top
+        );
 
     const faceArea =
-        faceWidth * faceHeight;
+        faceWidth *
+        faceHeight;
 
     let bestImage = null;
     let bestScore = 0;
@@ -2754,7 +2803,7 @@ function getImageRegionForFace(
             continue;
         }
 
-        // Ignore images that are not visible in the current viewport.
+        // Ignore images outside current viewport.
         if (
             rect.right <= 0 ||
             rect.bottom <= 0 ||
@@ -2766,42 +2815,45 @@ function getImageRegionForFace(
 
         const intersectionLeft =
             Math.max(
-                faceRect.left,
+                cssFaceRect.left,
                 rect.left
             );
 
         const intersectionTop =
             Math.max(
-                faceRect.top,
+                cssFaceRect.top,
                 rect.top
             );
 
         const intersectionRight =
             Math.min(
-                faceRect.right,
+                cssFaceRect.right,
                 rect.right
             );
 
         const intersectionBottom =
             Math.min(
-                faceRect.bottom,
+                cssFaceRect.bottom,
                 rect.bottom
             );
 
         const intersectionWidth =
             Math.max(
                 0,
-                intersectionRight - intersectionLeft
+                intersectionRight -
+                intersectionLeft
             );
 
         const intersectionHeight =
             Math.max(
                 0,
-                intersectionBottom - intersectionTop
+                intersectionBottom -
+                intersectionTop
             );
 
         const intersectionArea =
-            intersectionWidth * intersectionHeight;
+            intersectionWidth *
+            intersectionHeight;
 
         const centerInside =
             faceCenterX >= rect.left &&
@@ -2816,16 +2868,18 @@ function getImageRegionForFace(
             continue;
         }
 
-        // Prefer an image that contains the face center and covers
-        // the largest portion of the detected face.
         const overlapScore =
-            intersectionArea / faceArea;
+            intersectionArea /
+            faceArea;
 
         const score =
             (centerInside ? 2 : 0) +
             overlapScore;
 
-        if (score > bestScore) {
+        if (
+            score >
+            bestScore
+        ) {
             bestScore = score;
             bestImage = rect;
         }
@@ -2836,20 +2890,33 @@ function getImageRegionForFace(
     }
 
     return {
-        left: bestImage.left,
-        top: bestImage.top,
-        right: bestImage.right,
-        bottom: bestImage.bottom,
-        width: bestImage.width,
-        height: bestImage.height
+
+        left:
+            bestImage.left,
+
+        top:
+            bestImage.top,
+
+        right:
+            bestImage.right,
+
+        bottom:
+            bestImage.bottom,
+
+        width:
+            bestImage.width,
+
+        height:
+            bestImage.height
     };
 }
-
 
 function getFaceImageRegions(
     detectionList,
     viewportWidth,
-    viewportHeight
+    viewportHeight,
+    canvasWidth,
+    canvasHeight
 ) {
 
     const regions = [];
@@ -2871,11 +2938,44 @@ function getFaceImageRegions(
         }
 
         const imageRect =
-            getImageRegionForFace(
-                detection.rect,
-                viewportWidth,
-                viewportHeight
-            );
+    getImageRegionForFace(
+        detection.rect,
+        viewportWidth,
+        viewportHeight,
+        canvasWidth,
+        canvasHeight
+    );
+
+console.log(
+    "[FACE MAP]",
+    {
+        face: {
+            left: Number(detection.rect.left.toFixed(1)),
+            top: Number(detection.rect.top.toFixed(1)),
+            right: Number(detection.rect.right.toFixed(1)),
+            bottom: Number(detection.rect.bottom.toFixed(1))
+        },
+
+        mappedImage: imageRect
+            ? {
+                left: Number(imageRect.left.toFixed(1)),
+                top: Number(imageRect.top.toFixed(1)),
+                right: Number(imageRect.right.toFixed(1)),
+                bottom: Number(imageRect.bottom.toFixed(1))
+            }
+            : null,
+
+        viewport: {
+            width: viewportWidth,
+            height: viewportHeight
+        },
+
+        canvas: {
+            width: canvasWidth,
+            height: canvasHeight
+        }
+    }
+);
 
         /*
          * IMPORTANT:
@@ -3447,11 +3547,13 @@ function sanitizeScreenshot(
                             // A face is redacted at the image-element level.
                             // This keeps the rest of the screenshot visible.
                             const faceImageRects =
-                                getFaceImageRegions(
-                                    detectionList,
-                                    viewportWidth,
-                                    viewportHeight
-                                );
+    getFaceImageRegions(
+        detectionList,
+        viewportWidth,
+        viewportHeight,
+        canvas.width,
+        canvas.height
+    );
 
 
                             faceImageRects.forEach(

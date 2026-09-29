@@ -14,11 +14,12 @@
 
     const MAX_INFERENCE_DIMENSION = 1280;
 
-    const STANDARD_TILE = 512;
-    const SMALL_TILE = 384;
-    const TINY_TILE = 256;
+  const STANDARD_TILE = 512;
+const SMALL_TILE = 384;
+const TINY_TILE = 256;
+const MICRO_TILE = 192;
 
-    const TILE_OVERLAP = 0.20;
+const TILE_OVERLAP = 0.20;
 
     const MIN_FACE_SIZE = 8;
 
@@ -1831,7 +1832,22 @@
             allDetections.push(
                 ...tinyDetections
             );
+           // ------------------------------------------------
+// MICRO FACE
+// ------------------------------------------------
+// Smaller tiles enlarge tiny faces during inference.
+// This is especially useful for crowd/group images.
+// ------------------------------------------------
 
+const microDetections =
+    await detectTiles(
+        inference.canvas,
+        MICRO_TILE
+    );
+
+allDetections.push(
+    ...microDetections
+);
 
             // ------------------------------------------------
             // MAP BACK TO SOURCE COORDINATES
@@ -1935,7 +1951,31 @@
                 merged.length
             );
 
-
+            console.log(
+    "[FACE DEBUG] FINAL FACE BOXES:",
+    JSON.stringify(
+        merged.map((face, index) => ({
+            index: index + 1,
+            confidence: Number(
+                face.confidence.toFixed(3)
+            ),
+            left: Number(
+                face.rect.left.toFixed(1)
+            ),
+            top: Number(
+                face.rect.top.toFixed(1)
+            ),
+            right: Number(
+                face.rect.right.toFixed(1)
+            ),
+            bottom: Number(
+                face.rect.bottom.toFixed(1)
+            )
+        })),
+        null,
+        2
+    )
+);
             return merged;
 
         } catch (error) {
