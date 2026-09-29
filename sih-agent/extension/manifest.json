@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "SIH Privacy Browser Agent",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Privacy-preserving on-device visual perception for browser agents.",
 
   "permissions": [
@@ -42,7 +42,7 @@
 
   "browser_specific_settings": {
     "gecko": {
-      "id": "@devins-privacy-agent",
+      "id": "@devins-privacy-agent-2026",
       "data_collection_permissions": {
         "required": [
           "websiteActivity",
@@ -53,9 +53,14 @@
   },
 
   "action": {
-    "default_title": "Devins Privacy Browser Agent",
-    "default_popup": "popup.html"
-  },
+  "default_title": "Devins Privacy Browser Agent",
+  "default_popup": "popup.html",
+  "default_icon": {
+    "16": "assets/devins-16.png",
+    "32": "assets/devins-32.png",
+    "48": "assets/devins-48.png"
+  }
+},
 
   "icons": {
     "16": "assets/devins-16.png",
